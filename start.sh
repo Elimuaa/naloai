@@ -1,15 +1,8 @@
 #!/bin/bash
-set -e
-
-echo "⚡ CryptoBot starting..."
-
-# Generate secrets if not set
-export JWT_SECRET_KEY="${JWT_SECRET_KEY:-$(python3 -c 'import secrets; print(secrets.token_hex(32))')}"
-export JWT_REFRESH_SECRET="${JWT_REFRESH_SECRET:-$(python3 -c 'import secrets; print(secrets.token_hex(32))')}"
-export DEMO_MODE="${DEMO_MODE:-true}"
-
-echo "📦 Building frontend..."
-cd frontend && npm install --silent && npm run build && cd ..
-
-echo "🚀 Starting server on port 8080..."
-exec uvicorn main:app --host 0.0.0.0 --port 8080
+echo "=== Starting Nalo.Ai ==="
+echo "Python: $(python3 --version)"
+echo "PORT: $PORT"
+echo "Checking imports..."
+python3 -c "from main import app; print('All imports OK')" || { echo "IMPORT FAILED"; exit 1; }
+echo "Starting uvicorn..."
+exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} --timeout-keep-alive 120
