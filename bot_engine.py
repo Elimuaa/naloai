@@ -35,7 +35,7 @@ def _get_client(user: User, force_demo: bool = False):
     else:
         logger.info(f"force_demo=True for user {user.id}, using mock")
     from mock_robinhood import MockRobinhoodClient
-    client = MockRobinhoodClient(symbol=user.trading_symbol)
+    client = MockRobinhoodClient(symbol=user.trading_symbol, balance=user.demo_balance or 10000.0)
     _client_cache[cache_key] = client
     return client
 
@@ -355,6 +355,14 @@ async def _bot_loop(user_id: str):
                         (current_price - state.entry_price) if state.trade_side == "buy"
                         else (state.entry_price - current_price)
                     )
+                    # Persist updated demo balance to DB
+                    if is_demo and hasattr(client, 'balance'):
+                        async with AsyncSessionLocal() as db2:
+                            await db2.execute(
+                                update(User).where(User.id == user_id).values(demo_balance=client.balance)
+                            )
+                            await db2.commit()
+
                     await ws_manager.send_to_user(user_id, {
                         "type": "trade_closed",
                         "symbol": symbol,
@@ -363,6 +371,7 @@ async def _bot_loop(user_id: str):
                         "pnl": pnl,
                         "pnl_pct": (pnl / state.entry_price) * 100,
                         "demo_mode": is_demo,
+                        "demo_balance": client.balance if is_demo and hasattr(client, 'balance') else None,
                     })
                     state.in_trade = False
                     state.entry_price = None
@@ -443,6 +452,7 @@ async def _bot_loop(user_id: str):
                 "trail_stop": state.trail_stop_price,
                 "last_signal": state.last_signal,
                 "demo_mode": is_demo,
+                "demo_balance": round(client.balance, 2) if is_demo and hasattr(client, 'balance') else None,
             })
 
         except asyncio.CancelledError:

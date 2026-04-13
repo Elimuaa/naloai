@@ -48,6 +48,9 @@ class User(Base):
     take_profit_pct: Mapped[float] = mapped_column(Float, default=0.05)
     trail_stop_pct: Mapped[float] = mapped_column(Float, default=0.015)
 
+    # Demo balance — user-configurable starting balance for paper trading
+    demo_balance: Mapped[float] = mapped_column(Float, default=10000.0)
+
 
 class Trade(Base):
     __tablename__ = "trades"
@@ -105,11 +108,15 @@ async def init_db():
         await conn.execute(text("PRAGMA busy_timeout=30000"))
         await conn.execute(text("PRAGMA synchronous=NORMAL"))
         await conn.execute(text("PRAGMA foreign_keys=ON"))
-        # Migrate: add is_demo column if missing
-        try:
-            await conn.execute(text("ALTER TABLE trades ADD COLUMN is_demo BOOLEAN DEFAULT 0"))
-        except Exception:
-            pass  # Column already exists
+        # Migrate: add columns if missing
+        for stmt in [
+            "ALTER TABLE trades ADD COLUMN is_demo BOOLEAN DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN demo_balance REAL DEFAULT 10000.0",
+        ]:
+            try:
+                await conn.execute(text(stmt))
+            except Exception:
+                pass  # Column already exists
 
 
 async def get_db():

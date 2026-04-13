@@ -37,15 +37,25 @@ def _get_simulated_price(symbol: str) -> float:
 class MockRobinhoodClient:
     """Drop-in replacement for RobinhoodCryptoClient that returns fake data."""
 
-    def __init__(self, symbol: str = "BTC-USD"):
+    def __init__(self, symbol: str = "BTC-USD", balance: float = 10000.0):
         self.symbol = symbol
-        logger.info("🎭 MockRobinhoodClient initialized — UI demo mode active")
+        self.balance = balance
+        self._holdings: dict[str, float] = {}  # symbol -> quantity
+        logger.info(f"🎭 MockRobinhoodClient initialized — demo balance: ${balance:,.2f}")
 
     async def get_account(self) -> dict:
-        return {"results": [{"buying_power": "10000.00", "currency": "USD"}]}
+        return {"buying_power": str(round(self.balance, 4)), "buying_power_currency": "USD"}
 
     async def get_holdings(self) -> dict:
-        return {"results": []}
+        results = []
+        for sym, qty in self._holdings.items():
+            if qty > 0:
+                results.append({
+                    "asset_code": sym.replace("-USD", ""),
+                    "total_quantity": str(qty),
+                    "quantity_available_for_trading": str(qty),
+                })
+        return {"results": results}
 
     async def get_best_bid_ask(self, symbol: str) -> dict:
         price = _get_simulated_price(symbol)
@@ -66,8 +76,19 @@ class MockRobinhoodClient:
 
     async def place_market_order(self, symbol: str, side: str, asset_quantity: str) -> dict:
         price = _get_simulated_price(symbol)
+        qty = float(asset_quantity)
         order_id = str(uuid.uuid4())
-        logger.info(f"🎭 Mock order: {side} {asset_quantity} {symbol} @ ${price:.2f}")
+
+        if side == "buy":
+            cost = price * qty
+            self.balance -= cost
+            self._holdings[symbol] = self._holdings.get(symbol, 0) + qty
+        else:
+            proceeds = price * qty
+            self.balance += proceeds
+            self._holdings[symbol] = max(0, self._holdings.get(symbol, 0) - qty)
+
+        logger.info(f"🎭 Mock order: {side} {asset_quantity} {symbol} @ ${price:.2f} | balance: ${self.balance:,.2f}")
         await asyncio.sleep(0.1)  # simulate network latency
         return {
             "id": order_id,
@@ -90,4 +111,4 @@ class MockRobinhoodClient:
         return _get_simulated_price(symbol)
 
     async def get_portfolio_cash(self) -> float:
-        return 10000.0
+        return round(self.balance, 4)

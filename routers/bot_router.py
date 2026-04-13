@@ -26,6 +26,10 @@ class StartPayload(BaseModel):
     mode: str = "auto"  # "demo", "live", or "auto" (auto = live if keys exist, else demo)
 
 
+class DemoBalancePayload(BaseModel):
+    balance: float = 10000.0
+
+
 class SettingsPayload(BaseModel):
     trading_symbol: str = "BTC-USD"
     entry_z: float = 2.0
@@ -139,13 +143,16 @@ async def get_settings(current_user: User = Depends(get_current_user)):
         "has_api_keys": bool(current_user.rh_api_key),
         "demo_mode": not bool(current_user.rh_api_key),
         "public_key": current_user.ed25519_public_key or "",
+        "demo_balance": current_user.demo_balance or 10000.0,
     }
 
 
 @router.get("/balance")
 async def get_balance(current_user: User = Depends(get_current_user)):
     if not current_user.rh_api_key:
-        return {"available": None, "holdings": [], "error": "No API keys configured"}
+        # Demo mode — return demo balance
+        demo_bal = current_user.demo_balance or 10000.0
+        return {"available": demo_bal, "holdings": [], "is_demo": True}
 
     private_key = current_user.ed25519_private_key or current_user.rh_private_key
     if not private_key:
@@ -281,3 +288,60 @@ async def test_connection(current_user: User = Depends(get_current_user)):
         else:
             detail = f"Connection failed: {err}"
         return {"ok": False, "error": detail}
+
+
+@router.post("/demo-balance")
+async def set_demo_balance(
+    payload: DemoBalancePayload,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Set the demo starting balance. Resets the cached mock client so the new balance takes effect."""
+    bal = max(0, payload.balance)
+    await db.execute(update(User).where(User.id == current_user.id).values(demo_balance=bal))
+    await db.commit()
+
+    # Clear cached mock client so next bot loop iteration picks up new balance
+    from bot_engine import _client_cache, _bot_tasks
+    demo_key = f"{current_user.id}:demo"
+    _client_cache.pop(demo_key, None)
+
+    # If bot is running in demo, restart to apply new balance
+    if current_user.id in _bot_tasks and not _bot_tasks[current_user.id].done():
+        await stop_bot(current_user.id)
+        await db.execute(update(User).where(User.id == current_user.id).values(bot_active=True))
+        await db.commit()
+        await start_bot(current_user.id, force_demo=True)
+        return {"message": f"Demo balance set to ${bal:,.2f} — bot restarted", "balance": bal}
+
+    return {"message": f"Demo balance set to ${bal:,.2f}", "balance": bal}
+
+
+@router.post("/demo-balance/clear")
+async def clear_demo_balance(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Reset demo balance to default $10,000 and clear all demo trades."""
+    default_bal = 10000.0
+    await db.execute(update(User).where(User.id == current_user.id).values(demo_balance=default_bal))
+    await db.commit()
+
+    # Delete demo trades for this user
+    from database import Trade
+    from sqlalchemy import delete
+    await db.execute(delete(Trade).where(Trade.user_id == current_user.id, Trade.is_demo == True))
+    await db.commit()
+
+    # Clear cached mock client
+    from bot_engine import _client_cache, _bot_tasks
+    _client_cache.pop(f"{current_user.id}:demo", None)
+
+    # Restart bot if running
+    if current_user.id in _bot_tasks and not _bot_tasks[current_user.id].done():
+        await stop_bot(current_user.id)
+        await db.execute(update(User).where(User.id == current_user.id).values(bot_active=True))
+        await db.commit()
+        await start_bot(current_user.id, force_demo=True)
+
+    return {"message": "Demo balance reset to $10,000 and demo trades cleared", "balance": default_bal}

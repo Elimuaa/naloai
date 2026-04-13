@@ -89,6 +89,7 @@ interface Settings {
   has_api_keys: boolean
   demo_mode?: boolean
   public_key?: string
+  demo_balance?: number
 }
 
 interface Balance {
@@ -159,6 +160,9 @@ export function Dashboard() {
 
   const [testLoading, setTestLoading] = useState(false)
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [demoBalanceInput, setDemoBalanceInput] = useState('10000')
+  const [demoBalanceLoading, setDemoBalanceLoading] = useState(false)
+  const [liveDemoBalance, setLiveDemoBalance] = useState<number | null>(null)
 
   // Settings form — research-backed optimal defaults for BTC Z-score retest strategy
   const [rhApiKey, setRhApiKey] = useState('')
@@ -209,9 +213,13 @@ export function Dashboard() {
       setFormStopLoss(s.stop_loss_pct)
       setFormTakeProfit(s.take_profit_pct)
       setFormTrailStop(s.trail_stop_pct)
-      if (s.has_api_keys) {
-        api.get('/api/bot/balance').then(r => setBalance(r.data)).catch(() => {})
-      }
+      setDemoBalanceInput(String(s.demo_balance ?? 10000))
+      if (!liveDemoBalance) setLiveDemoBalance(s.demo_balance ?? 10000)
+      // Always fetch balance (demo or live)
+      api.get('/api/bot/balance').then(r => {
+        setBalance(r.data)
+        if (r.data.is_demo && r.data.available) setLiveDemoBalance(r.data.available)
+      }).catch(() => {})
     }
     if (aiStatusR.status === 'fulfilled') {
       setAnthropicConfigured(aiStatusR.value.data.configured)
@@ -235,6 +243,7 @@ export function Dashboard() {
           // Only use bot price if live (not demo) — real market price poll is source of truth for header
           if (!d.demo_mode && d.price) setLivePrice(d.price)
           setLiveZ(d.z_score)
+          if (d.demo_balance != null) setLiveDemoBalance(d.demo_balance)
           setBotStatus(prev => prev
             ? { ...prev, running: true, in_trade: d.in_trade, entry_price: d.entry_price, trade_side: d.trade_side, trail_stop: d.trail_stop, last_signal: d.last_signal, demo_mode: d.demo_mode, ...(d.key_invalid === false ? { key_invalid: false } : {}) }
             : null)
@@ -243,6 +252,7 @@ export function Dashboard() {
           loadData()
         } else if (d.type === 'trade_closed') {
           const pnl = (d.pnl as number) || 0
+          if (d.demo_balance != null) setLiveDemoBalance(d.demo_balance)
           addFeed('trade_closed', `Closed (${d.exit_reason}) · P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)}${d.demo_mode ? ' [DEMO]' : ''}`, pnl >= 0 ? 'text-profit' : 'text-loss')
           loadData()
         } else if (d.type === 'ai_analysis_ready') {
@@ -624,37 +634,47 @@ export function Dashboard() {
               ))}
             </div>
 
-            {/* Robinhood Balance */}
-            {balance && !balance.error && (
-              <div className="mt-4 pt-4 border-t border-border">
-                <p className="text-xs font-semibold text-muted mb-2 uppercase tracking-wider">Robinhood Balance</p>
-                {balance.available !== null && (
-                  <div className="p-3 rounded-xl bg-elevated mb-2">
-                    <p className="text-xs text-muted mb-1">Buying Power</p>
-                    <p className="text-xl font-bold font-mono text-profit">
-                      ${balance.available.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </p>
-                  </div>
-                )}
-                {balance.holdings.length > 0 && (
-                  <div className="space-y-1.5">
-                    {balance.holdings.map((h, i) => (
-                      <div key={i} className="flex justify-between items-center px-3 py-2 rounded-xl bg-elevated text-xs">
-                        <span className="font-semibold">{h.asset_code}</span>
-                        <span className="font-mono text-muted">{parseFloat(h.total_quantity).toFixed(6)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {balance?.error && balance.error !== 'No API keys configured' && (
-              <div className="mt-3 px-3 py-2 rounded-xl bg-loss/10 border border-loss/30">
-                <p className="text-xs text-loss font-medium">Balance unavailable</p>
-                <p className="text-xs text-muted mt-0.5">{balance.error}</p>
-                <button onClick={() => setShowSettings(true)} className="text-xs text-accent mt-1 hover:underline">Open Settings →</button>
-              </div>
-            )}
+            {/* Balance — Demo or Live */}
+            <div className="mt-4 pt-4 border-t border-border">
+              <p className="text-xs font-semibold text-muted mb-2 uppercase tracking-wider">
+                {isDemo ? 'Demo Balance' : 'Robinhood Balance'}
+              </p>
+              {isDemo ? (
+                <div className="p-3 rounded-xl bg-elevated mb-2">
+                  <p className="text-xs text-muted mb-1">Paper Trading Balance</p>
+                  <p className="text-xl font-bold font-mono text-warning">
+                    ${(liveDemoBalance ?? settings?.demo_balance ?? 10000).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </p>
+                </div>
+              ) : balance && !balance.error ? (
+                <>
+                  {balance.available !== null && (
+                    <div className="p-3 rounded-xl bg-elevated mb-2">
+                      <p className="text-xs text-muted mb-1">Buying Power</p>
+                      <p className="text-xl font-bold font-mono text-profit">
+                        ${balance.available.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </p>
+                    </div>
+                  )}
+                  {balance.holdings.length > 0 && (
+                    <div className="space-y-1.5">
+                      {balance.holdings.map((h, i) => (
+                        <div key={i} className="flex justify-between items-center px-3 py-2 rounded-xl bg-elevated text-xs">
+                          <span className="font-semibold">{h.asset_code}</span>
+                          <span className="font-mono text-muted">{parseFloat(h.total_quantity).toFixed(6)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : balance?.error ? (
+                <div className="px-3 py-2 rounded-xl bg-loss/10 border border-loss/30">
+                  <p className="text-xs text-loss font-medium">Balance unavailable</p>
+                  <p className="text-xs text-muted mt-0.5">{balance.error}</p>
+                  <button onClick={() => setShowSettings(true)} className="text-xs text-accent mt-1 hover:underline">Open Settings →</button>
+                </div>
+              ) : null}
+            </div>
           </div>
 
           <div className="lg:col-span-2 bg-card border border-border rounded-2xl p-5">
@@ -1036,6 +1056,62 @@ export function Dashboard() {
                     {anthropicLoading ? 'Saving…' : anthropicConfigured ? 'Update Key' : 'Enable AI'}
                   </button>
                 </div>
+              </div>
+
+              {/* Demo Balance */}
+              <div className="lg:col-span-2 mb-2">
+                <h3 className="font-semibold mb-4 text-sm flex items-center gap-2">
+                  Demo Balance
+                  <span className="text-xs text-warning font-normal">Paper trading</span>
+                </h3>
+                <div className="flex items-end gap-3">
+                  <div className="flex-1">
+                    <label className="block text-xs text-muted mb-1.5">Starting Balance ($)</label>
+                    <input
+                      type="number"
+                      value={demoBalanceInput}
+                      onChange={e => setDemoBalanceInput(e.target.value)}
+                      min={0}
+                      step={1000}
+                      className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm font-mono focus:outline-none focus:border-accent"
+                    />
+                  </div>
+                  <button
+                    onClick={async () => {
+                      setDemoBalanceLoading(true)
+                      try {
+                        const res = await api.post('/api/bot/demo-balance', { balance: parseFloat(demoBalanceInput) || 10000 })
+                        setLiveDemoBalance(res.data.balance)
+                        showToast(`Demo balance set to $${res.data.balance.toLocaleString()}`)
+                        await loadData()
+                      } catch { showToast('Failed to set balance', false) }
+                      finally { setDemoBalanceLoading(false) }
+                    }}
+                    disabled={demoBalanceLoading}
+                    className="px-4 py-2.5 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 transition-colors text-sm font-medium"
+                  >
+                    {demoBalanceLoading ? 'Setting…' : 'Set Balance'}
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (!confirm('Reset demo balance to $10,000 and clear all demo trades?')) return
+                      setDemoBalanceLoading(true)
+                      try {
+                        const res = await api.post('/api/bot/demo-balance/clear')
+                        setLiveDemoBalance(res.data.balance)
+                        setDemoBalanceInput('10000')
+                        showToast('Demo reset — balance $10,000, trades cleared')
+                        await loadData()
+                      } catch { showToast('Failed to reset', false) }
+                      finally { setDemoBalanceLoading(false) }
+                    }}
+                    disabled={demoBalanceLoading}
+                    className="px-4 py-2.5 rounded-xl bg-loss/15 border border-loss/40 text-loss hover:bg-loss/25 disabled:opacity-50 transition-colors text-sm font-medium"
+                  >
+                    Clear All
+                  </button>
+                </div>
+                <p className="text-xs text-muted mt-2">Set your paper trading balance. "Clear All" resets to $10,000 and removes all demo trade history.</p>
               </div>
 
               {/* Bot Parameters */}
