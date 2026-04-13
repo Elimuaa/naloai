@@ -6,14 +6,15 @@ interface User {
   email: string
   has_api_keys: boolean
   bot_active: boolean
+  is_admin?: boolean
 }
 
 interface AuthCtx {
   user: User | null
   isAuthenticated: boolean
   isLoading: boolean
-  login: (email: string, password: string) => Promise<void>
-  signup: (email: string, password: string) => Promise<void>
+  login: (email: string, password: string) => Promise<User>
+  signup: (email: string, password: string) => Promise<User>
   logout: () => void
   refreshUser: () => Promise<void>
 }
@@ -47,12 +48,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const res = await api.post('/api/auth/login', { email, password })
     setAccessToken(res.data.access_token)
     setUser(res.data.user)
+    return res.data.user
   }, [])
 
   const signup = useCallback(async (email: string, password: string) => {
     const res = await api.post('/api/auth/signup', { email, password })
     setAccessToken(res.data.access_token)
     setUser(res.data.user)
+    return res.data.user
   }, [])
 
   const logout = useCallback(async () => {

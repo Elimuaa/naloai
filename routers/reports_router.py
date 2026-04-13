@@ -3,8 +3,20 @@ from database import get_db, DailyReport, AsyncSession
 from auth import get_current_user, User
 from sqlalchemy import select, desc
 import json
+import logging
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/reports", tags=["reports"])
+
+
+def _safe_json_report(data: str | None) -> dict:
+    if not data or not data.strip():
+        return {}
+    try:
+        return json.loads(data)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning(f"Failed to parse report JSON: {data[:100]}")
+        return {}
 
 
 @router.get("")
@@ -30,7 +42,7 @@ async def get_reports(
         "win_rate": r.win_rate,
         "summary": r.summary,
         "top_improvement": r.top_improvement,
-        "full_report": json.loads(r.full_report_json) if r.full_report_json else {}
+        "full_report": _safe_json_report(r.full_report_json)
     } for r in reports]
 
 
@@ -57,5 +69,5 @@ async def get_latest_report(
         "win_rate": r.win_rate,
         "summary": r.summary,
         "top_improvement": r.top_improvement,
-        "full_report": json.loads(r.full_report_json) if r.full_report_json else {}
+        "full_report": _safe_json_report(r.full_report_json)
     }

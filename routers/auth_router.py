@@ -5,8 +5,14 @@ from database import get_db, User, AsyncSession
 from auth import (hash_password, verify_password, create_access_token,
                   create_refresh_token, decode_refresh_token, get_current_user)
 import jwt
+import os
 import nacl.signing
 import base64
+
+
+def _is_admin(email: str) -> bool:
+    admin_email = os.getenv("ADMIN_EMAIL", "").lower().strip()
+    return bool(admin_email and email.lower().strip() == admin_email)
 
 
 def generate_ed25519_keypair():
@@ -59,12 +65,13 @@ async def signup(data: SignupRequest, response: Response, db: AsyncSession = Dep
     if len(data.password) < 8:
         raise HTTPException(400, "Password must be at least 8 characters")
 
-    existing = await db.execute(select(User).where(User.email == data.email))
+    email = data.email.lower().strip()
+    existing = await db.execute(select(User).where(User.email == email))
     if existing.scalar_one_or_none():
         raise HTTPException(400, "Email already registered")
 
     priv, pub = generate_ed25519_keypair()
-    user = User(email=data.email, hashed_password=hash_password(data.password),
+    user = User(email=email, hashed_password=hash_password(data.password),
                 ed25519_private_key=priv, ed25519_public_key=pub)
     db.add(user)
     await db.commit()
@@ -76,13 +83,14 @@ async def signup(data: SignupRequest, response: Response, db: AsyncSession = Dep
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "user": {"id": user.id, "email": user.email}
+        "user": {"id": user.id, "email": user.email, "is_admin": _is_admin(user.email)}
     }
 
 
 @router.post("/login")
 async def login(data: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.email == data.email))
+    email = data.email.lower().strip()
+    result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
     if not user or not verify_password(data.password, user.hashed_password):
         raise HTTPException(401, "Invalid email or password")
@@ -94,7 +102,7 @@ async def login(data: LoginRequest, response: Response, db: AsyncSession = Depen
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "user": {"id": user.id, "email": user.email}
+        "user": {"id": user.id, "email": user.email, "is_admin": _is_admin(user.email)}
     }
 
 
@@ -119,7 +127,7 @@ async def refresh(request: Request, response: Response, db: AsyncSession = Depen
     set_refresh_cookie(response, new_refresh)
     return {
         "access_token": new_access,
-        "user": {"id": user.id, "email": user.email}
+        "user": {"id": user.id, "email": user.email, "is_admin": _is_admin(user.email)}
     }
 
 
@@ -136,5 +144,6 @@ async def me(current_user: User = Depends(get_current_user)):
         "email": current_user.email,
         "has_api_keys": bool(current_user.rh_api_key),
         "bot_active": current_user.bot_active,
-        "trading_symbol": current_user.trading_symbol
+        "trading_symbol": current_user.trading_symbol,
+        "is_admin": _is_admin(current_user.email),
     }

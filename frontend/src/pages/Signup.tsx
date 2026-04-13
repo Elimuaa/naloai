@@ -74,7 +74,7 @@ export function Signup() {
         <div className="text-center mb-8">
           <Link to="/" className="inline-flex items-center gap-2 text-white hover:text-accent transition-colors">
             <span className="text-3xl">⚡</span>
-            <span className="text-2xl font-bold" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>CryptoBot</span>
+            <span className="text-2xl font-bold" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>Nalo.Ai</span>
           </Link>
         </div>
 

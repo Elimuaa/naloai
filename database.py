@@ -51,6 +51,38 @@ class User(Base):
     # Demo balance — user-configurable starting balance for paper trading
     demo_balance: Mapped[float] = mapped_column(Float, default=10000.0)
 
+    # Advanced strategy settings
+    use_rsi_filter: Mapped[bool] = mapped_column(Boolean, default=True)
+    use_ema_filter: Mapped[bool] = mapped_column(Boolean, default=True)
+    use_adx_filter: Mapped[bool] = mapped_column(Boolean, default=True)
+    use_bbands_filter: Mapped[bool] = mapped_column(Boolean, default=True)
+    use_macd_filter: Mapped[bool] = mapped_column(Boolean, default=False)
+    use_volume_filter: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Risk management settings
+    max_drawdown_pct: Mapped[float] = mapped_column(Float, default=5.0)
+    max_stops_before_pause: Mapped[int] = mapped_column(Integer, default=3)
+    cooldown_ticks: Mapped[int] = mapped_column(Integer, default=5)
+    risk_per_trade_pct: Mapped[float] = mapped_column(Float, default=1.0)
+    max_exposure_pct: Mapped[float] = mapped_column(Float, default=20.0)
+
+    # Position sizing
+    position_size_mode: Mapped[str] = mapped_column(String, default="dynamic")  # "fixed" or "dynamic"
+    fixed_quantity: Mapped[float] = mapped_column(Float, default=0.0001)
+
+    # Telegram notifications
+    telegram_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Premium subscription
+    is_premium: Mapped[bool] = mapped_column(Boolean, default=False)
+    premium_since: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    calibration_count: Mapped[int] = mapped_column(Integer, default=0)  # Total calibrations run
+    last_calibration_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # Stripe
+    stripe_customer_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    stripe_subscription_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
 
 class Trade(Base):
     __tablename__ = "trades"
@@ -70,6 +102,11 @@ class Trade(Base):
     exit_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # stop_loss / take_profit / trailing_stop
     opened_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # Numeric quantity for position sizing
+    quantity_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=0)
+    # JSON snapshot of indicators at entry time
+    indicators_snapshot: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # AI analysis fields (populated by post_trade_ai_learner.py after close)
     ai_grade: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -100,6 +137,21 @@ class DailyReport(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class CalibrationLog(Base):
+    __tablename__ = "calibration_logs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    # What changed
+    param_changes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON: {param: {old, new, reason}}
+    # Context
+    trade_count_analyzed: Mapped[int] = mapped_column(Integer, default=0)
+    win_rate_before: Mapped[float] = mapped_column(Float, default=0.0)
+    projected_improvement: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ai_reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
 async def init_db():
     os.makedirs("data", exist_ok=True)
     async with engine.begin() as conn:
@@ -112,11 +164,38 @@ async def init_db():
         for stmt in [
             "ALTER TABLE trades ADD COLUMN is_demo BOOLEAN DEFAULT 0",
             "ALTER TABLE users ADD COLUMN demo_balance REAL DEFAULT 10000.0",
+            "ALTER TABLE users ADD COLUMN use_rsi_filter BOOLEAN DEFAULT 1",
+            "ALTER TABLE users ADD COLUMN use_ema_filter BOOLEAN DEFAULT 1",
+            "ALTER TABLE users ADD COLUMN use_adx_filter BOOLEAN DEFAULT 1",
+            "ALTER TABLE users ADD COLUMN use_bbands_filter BOOLEAN DEFAULT 1",
+            "ALTER TABLE users ADD COLUMN use_macd_filter BOOLEAN DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN use_volume_filter BOOLEAN DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN max_drawdown_pct REAL DEFAULT 5.0",
+            "ALTER TABLE users ADD COLUMN max_stops_before_pause INTEGER DEFAULT 3",
+            "ALTER TABLE users ADD COLUMN cooldown_ticks INTEGER DEFAULT 5",
+            "ALTER TABLE users ADD COLUMN risk_per_trade_pct REAL DEFAULT 1.0",
+            "ALTER TABLE users ADD COLUMN max_exposure_pct REAL DEFAULT 20.0",
+            "ALTER TABLE users ADD COLUMN position_size_mode TEXT DEFAULT 'dynamic'",
+            "ALTER TABLE users ADD COLUMN fixed_quantity REAL DEFAULT 0.0001",
+            "ALTER TABLE users ADD COLUMN telegram_enabled BOOLEAN DEFAULT 0",
+            "ALTER TABLE trades ADD COLUMN quantity_value REAL DEFAULT 0",
+            "ALTER TABLE trades ADD COLUMN indicators_snapshot TEXT DEFAULT NULL",
+            "ALTER TABLE users ADD COLUMN is_premium BOOLEAN DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN premium_since DATETIME DEFAULT NULL",
+            "ALTER TABLE users ADD COLUMN calibration_count INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN last_calibration_at DATETIME DEFAULT NULL",
+            "ALTER TABLE users ADD COLUMN stripe_customer_id TEXT DEFAULT NULL",
+            "ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT DEFAULT NULL",
         ]:
             try:
                 await conn.execute(text(stmt))
-            except Exception:
-                pass  # Column already exists
+            except Exception as e:
+                err_msg = str(e).lower()
+                if "duplicate column" in err_msg or "already exists" in err_msg:
+                    pass  # Column already exists, expected
+                else:
+                    import logging
+                    logging.getLogger(__name__).warning(f"Migration warning: {stmt[:60]}... -> {e}")
 
 
 async def get_db():

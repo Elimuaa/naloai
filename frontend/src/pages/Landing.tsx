@@ -105,7 +105,7 @@ export function Landing() {
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-2xl">⚡</span>
-            <span className="text-lg font-bold" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>CryptoBot</span>
+            <span className="text-lg font-bold" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>Nalo.Ai</span>
           </div>
           <div className="flex items-center gap-4">
             <Link to="/login" className="text-sm text-muted hover:text-white transition-colors">Login</Link>
@@ -140,7 +140,7 @@ export function Landing() {
               Always Learning.
             </h1>
             <p className="text-lg text-muted leading-relaxed mb-8 max-w-lg">
-              Automate your Robinhood crypto trades with a Z-Score strategy, then let AI analyze every trade and improve itself daily.
+              Automate your Robinhood crypto trades with our AI-powered strategy, then let AI analyze every trade and improve itself daily.
             </p>
             <div className="flex flex-col sm:flex-row gap-4 mb-6">
               <button
@@ -186,13 +186,13 @@ export function Landing() {
                 num: '02',
                 icon: '🤖',
                 title: 'Bot Runs 24/7',
-                desc: 'The Z-Score strategy trades automatically while you sleep. No manual intervention needed.'
+                desc: 'Our proprietary strategy trades automatically while you sleep. No manual intervention needed.'
               },
               {
                 num: '03',
                 icon: '🧠',
-                title: 'AI Reviews Every Trade',
-                desc: 'Claude analyzes each closed trade and sends you a daily performance report with actionable insights.'
+                title: 'AI Screens & Reviews Every Trade',
+                desc: 'Claude screens signals before entry, reviews every closed trade, learns from your patterns, and auto-calibrates your strategy daily.'
               }
             ].map((step, i) => (
               <div key={i} className="relative p-8 rounded-2xl border border-border bg-elevated hover:border-accent/30 transition-colors">
@@ -215,11 +215,11 @@ export function Landing() {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {[
-              { icon: '📊', title: 'Live Dashboard', desc: 'Real-time P&L, open positions, and live price feed updated every minute.' },
-              { icon: '🤖', title: 'AI Trade Analysis', desc: 'Grade, entry quality, exit quality, and what to improve — after every trade.' },
-              { icon: '📝', title: 'Daily Reports', desc: 'Win rate, avg R:R, and the top suggestion from Claude delivered every morning.' },
-              { icon: '🛡️', title: 'Risk Management', desc: 'Stop loss, take profit, and trailing stop built into every trade automatically.' },
-              { icon: '📈', title: 'Z-Score Strategy', desc: 'Battle-tested mean reversion signal identifies high-probability entry points.' },
+              { icon: '📊', title: 'Live Dashboard', desc: 'Real-time P&L, open positions, and live price feed updated every 15 seconds.' },
+              { icon: '🧠', title: 'AI Pre-Trade Screening', desc: 'Claude reviews every signal before entry — analyzing regime, indicators, and your trade history to approve or block.' },
+              { icon: '📈', title: 'Multi-Timeframe Strategy', desc: 'Fast and slow Z-score confirmation with ATR-adaptive stops. Only trades when multiple timeframes agree.' },
+              { icon: '🛡️', title: 'Institutional Risk Management', desc: 'ATR-adaptive trailing stops, signal-strength position sizing, market regime detection, and time-of-day filters.' },
+              { icon: '🤖', title: 'AI Pattern Memory', desc: 'Claude learns your failure patterns — which hours lose, which setups fail — and blocks similar trades automatically.' },
               { icon: '🔒', title: 'Your Data, Your Keys', desc: 'API keys stored securely on your account. Never shared, never exposed.' },
             ].map((feature, i) => (
               <div key={i} className="p-6 rounded-2xl border border-border bg-card hover:border-accent/30 hover:bg-elevated transition-all">
@@ -253,7 +253,7 @@ export function Landing() {
           <h2 className="text-4xl font-bold mb-4" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>
             Ready to automate your crypto trading?
           </h2>
-          <p className="text-muted mb-8">Join traders using CryptoBot to automate their Robinhood crypto strategy.</p>
+          <p className="text-muted mb-8">Join traders using Nalo.Ai to automate their Robinhood crypto strategy.</p>
           <button
             onClick={() => navigate('/signup')}
             className="glow px-10 py-4 rounded-xl bg-accent hover:bg-blue-500 transition-all font-semibold text-lg"
@@ -269,7 +269,7 @@ export function Landing() {
         <div className="max-w-7xl mx-auto px-6 text-center text-muted text-sm">
           <div className="flex items-center justify-center gap-2 mb-2">
             <span>⚡</span>
-            <span className="font-bold text-white">CryptoBot</span>
+            <span className="font-bold text-white">Nalo.Ai</span>
           </div>
           <p>Automated crypto trading powered by Claude AI · Not financial advice</p>
         </div>

@@ -14,7 +14,8 @@ from auth import get_current_user_ws
 from ws_manager import ws_manager
 from bot_engine import start_bot, _bot_tasks
 from scheduler import start_scheduler
-from routers import auth_router, bot_router, trades_router, reports_router, market_router
+from routers import auth_router, bot_router, trades_router, reports_router, market_router, admin_router, stripe_router
+from health_monitor import run_full_health_check, get_health_history
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ async def lifespan(app: FastAPI):
         task.cancel()
 
 
-app = FastAPI(title="CryptoBot", lifespan=lifespan)
+app = FastAPI(title="Nalo.Ai", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -55,6 +56,8 @@ app.include_router(bot_router.router)
 app.include_router(trades_router.router)
 app.include_router(reports_router.router)
 app.include_router(market_router.router)
+app.include_router(admin_router.router)
+app.include_router(stripe_router.router)
 
 
 # WebSocket
@@ -72,6 +75,29 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
             await websocket.receive_text()
     except WebSocketDisconnect:
         ws_manager.disconnect(user.id, websocket)
+    except Exception as e:
+        logger.warning(f"WebSocket error for user {user.id}: {e}")
+        ws_manager.disconnect(user.id, websocket)
+
+
+# Health monitoring endpoints
+@app.get("/api/health")
+async def health_check():
+    """Run a full health check across all subsystems."""
+    report = await run_full_health_check()
+    return report
+
+
+@app.get("/api/health/history")
+async def health_history():
+    """Get recent health check history."""
+    return get_health_history()
+
+
+@app.get("/api/health/quick")
+async def health_quick():
+    """Quick liveness check for uptime monitors."""
+    return {"status": "ok", "timestamp": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()}
 
 
 # Serve React frontend

@@ -37,6 +37,15 @@ class ConnectionManager:
         for ws in dead:
             self.disconnect(user_id, ws)
 
+    @property
+    def connections(self) -> dict:
+        return self._connections
+
+    async def broadcast(self, data: dict):
+        """Send a message to all connected users."""
+        for user_id in list(self._connections.keys()):
+            await self.send_to_user(user_id, data)
+
     async def broadcast_heartbeat(self):
         """Send heartbeat to all connected users"""
         for user_id in list(self._connections.keys()):

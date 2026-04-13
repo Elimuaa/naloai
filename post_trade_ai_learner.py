@@ -67,10 +67,15 @@ Return this exact JSON structure:
         )
         raw = response.content[0].text.strip()
         # Strip markdown if present
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
+        if "```" in raw:
+            parts = raw.split("```")
+            for part in parts[1:]:
+                stripped = part.strip()
+                if stripped.startswith("json"):
+                    stripped = stripped[4:].strip()
+                if stripped:
+                    raw = stripped
+                    break
         return json.loads(raw.strip())
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse AI response: {e}")
@@ -122,10 +127,15 @@ Return this exact JSON:
             messages=[{"role": "user", "content": prompt}]
         )
         raw = response.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
+        if "```" in raw:
+            parts = raw.split("```")
+            for part in parts[1:]:
+                stripped = part.strip()
+                if stripped.startswith("json"):
+                    stripped = stripped[4:].strip()
+                if stripped:
+                    raw = stripped
+                    break
         report_data = json.loads(raw.strip())
         report_data.update({
             "total_trades": len(trades),
