@@ -14,5 +14,6 @@ apscheduler>=3.10.0
 python-dotenv>=1.0.0
 pydantic[email]>=2.0.0
 cryptography>=42.0.0
+stripe>=8.0.0
 dwave-neal>=0.6.0
 dimod>=0.12.0
