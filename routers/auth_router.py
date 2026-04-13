@@ -137,6 +137,30 @@ async def logout(response: Response):
     return {"message": "Logged out"}
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@router.post("/change-password")
+async def change_password(
+    data: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    if not verify_password(data.current_password, current_user.hashed_password):
+        raise HTTPException(400, "Current password is incorrect")
+    if len(data.new_password) < 8:
+        raise HTTPException(400, "New password must be at least 8 characters")
+    await db.execute(
+        update(User).where(User.id == current_user.id).values(
+            hashed_password=hash_password(data.new_password)
+        )
+    )
+    await db.commit()
+    return {"message": "Password updated"}
+
+
 @router.get("/me")
 async def me(current_user: User = Depends(get_current_user)):
     return {
