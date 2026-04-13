@@ -6,6 +6,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Boolean, Float, Text, DateTime, Integer, text
 import uuid
 
+os.makedirs("data", exist_ok=True)
 DATABASE_URL = "sqlite+aiosqlite:///./data/app.db"
 
 engine = create_async_engine(
