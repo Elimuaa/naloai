@@ -794,6 +794,8 @@ async def _bot_loop(user_id: str):
                         passed, filter_reasons = _check_signal_filters(
                             state.price_history, entry_side, user, state, z_score
                         )
+                        is_premium_user = getattr(user, 'is_premium', False)
+
                         if not passed and not is_demo:
                             state.last_signal = f"Signal filtered: {filter_reasons[0]}"
                             logger.info(f"Signal filtered for {user_id}: {filter_reasons}")
@@ -806,11 +808,19 @@ async def _bot_loop(user_id: str):
                                 state.indicators, entry_side
                             )
 
-                            # AI Pre-trade screening (premium users only)
+                            # ── PREMIUM ADVANTAGE 1: Minimum signal strength gate ──
+                            # Free users take any signal that passes filters
+                            # Premium users only take high-quality signals (strength > 0.45)
+                            if is_premium_user and signal_strength < 0.45:
+                                state.last_signal = f"Pro filter: signal too weak ({signal_strength:.0%}), waiting for better setup"
+                                logger.info(f"Premium quality gate blocked {entry_side} for {user_id}: strength={signal_strength:.2f}")
+                                continue
+
+                            # ── PREMIUM ADVANTAGE 2: AI Pre-trade screening ──
                             ai_approved = True
-                            if getattr(user, 'is_premium', False) and os.getenv("ANTHROPIC_API_KEY"):
+                            ai_confidence = 0
+                            if is_premium_user and os.getenv("ANTHROPIC_API_KEY"):
                                 try:
-                                    # Get recent trades for context
                                     async with AsyncSessionLocal() as screen_db:
                                         recent_r = await screen_db.execute(
                                             select(Trade).where(
@@ -829,17 +839,44 @@ async def _bot_loop(user_id: str):
                                         state.regime, signal_strength
                                     )
                                     state.last_ai_screen = screen_result
+                                    ai_confidence = screen_result.get("confidence", 50)
                                     if not screen_result.get("take", True):
                                         ai_approved = False
                                         state.last_signal = f"AI blocked: {screen_result.get('reasoning', 'low confidence')}"
                                         logger.info(f"AI screen blocked trade for {user_id}: {screen_result}")
+
+                                    # ── PREMIUM ADVANTAGE 3: AI-adjusted risk params ──
+                                    # If AI suggests tighter SL/TP, use them
+                                    if ai_approved and screen_result.get("adjusted_sl"):
+                                        suggested_sl = float(screen_result["adjusted_sl"])
+                                        if 0.005 < suggested_sl < stop_loss_pct:
+                                            stop_loss_pct = suggested_sl
+                                            logger.info(f"AI tightened SL to {suggested_sl:.3f} for {user_id}")
+                                    if ai_approved and screen_result.get("adjusted_tp"):
+                                        suggested_tp = float(screen_result["adjusted_tp"])
+                                        if suggested_tp > take_profit_pct:
+                                            take_profit_pct = suggested_tp
+                                            logger.info(f"AI widened TP to {suggested_tp:.3f} for {user_id}")
                                 except Exception as e:
                                     logger.debug(f"AI screen error: {e}")
+
+                            # ── PREMIUM ADVANTAGE 4: Pattern memory filter ──
+                            if is_premium_user and ai_approved:
+                                try:
+                                    insights = get_pattern_insights(user_id)
+                                    current_hour = datetime.now(timezone.utc).hour
+                                    # Check if this hour+side combo has >65% loss rate
+                                    if insights.get("bad_hours") and current_hour in insights["bad_hours"]:
+                                        state.last_signal = f"Pattern memory: hour {current_hour} UTC historically loses"
+                                        logger.info(f"Pattern memory blocked {entry_side} at hour {current_hour} for {user_id}")
+                                        continue
+                                except Exception:
+                                    pass
 
                             if not ai_approved:
                                 pass  # Skip entry — AI blocked it
                             else:
-                                logger.info(f"Entering {entry_side} for {user_id} @ {current_price} (strength={signal_strength:.0%}, regime={state.regime})")
+                                logger.info(f"Entering {entry_side} for {user_id} @ {current_price} (strength={signal_strength:.0%}, regime={state.regime}, premium={is_premium_user})")
                                 state.last_signal = signal
 
                                 # Signal-strength position sizing
@@ -852,6 +889,9 @@ async def _bot_loop(user_id: str):
                                     )
                                     # Scale by signal strength: 50% at 0.3 strength, 100% at 0.7+
                                     strength_mult = min(1.0, max(0.5, signal_strength / 0.7))
+                                    # ── PREMIUM ADVANTAGE 5: Higher confidence = bigger position ──
+                                    if is_premium_user and ai_confidence > 70:
+                                        strength_mult = min(1.2, strength_mult * 1.15)  # Up to 20% bigger on high-confidence
                                     quantity = round(base_qty * strength_mult, 4)
                             state.current_quantity = quantity
                             qty_str = f"{quantity:.8f}".rstrip('0').rstrip('.')
