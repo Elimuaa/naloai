@@ -681,9 +681,9 @@ async def _bot_loop(user_id: str):
 
                 if exit_reason:
                     logger.info(f"Exiting {user_id}: {exit_reason} @ {current_price}")
+                    close_side = "sell" if state.trade_side == "buy" else "buy"
                     if not is_demo:
                         try:
-                            close_side = "sell" if state.trade_side == "buy" else "buy"
                             await client.place_market_order(symbol, close_side, str(state.current_quantity))
                         except Exception as e:
                             logger.error(f"Close order error for {user_id}: {e}")
@@ -692,6 +692,9 @@ async def _bot_loop(user_id: str):
                                 "message": f"Close order failed: {str(e)[:120]}. Trade remains open.",
                             })
                             continue
+                    else:
+                        # Demo mode: execute close order on mock client to update balance
+                        await client.place_market_order(symbol, close_side, str(state.current_quantity))
 
                     price_diff = (
                         (current_price - state.entry_price) if state.trade_side == "buy"
