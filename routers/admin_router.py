@@ -153,3 +153,90 @@ async def admin_toggle_premium(
     await db.execute(update(User).where(User.id == user_id).values(**values))
     await db.commit()
     return {"user_id": user_id, "is_premium": new_status}
+
+
+@router.post("/reset-all")
+async def admin_reset_all(
+    admin: User = Depends(verify_admin_jwt),
+    db: AsyncSession = Depends(get_db)
+):
+    """Admin: reset all users' demo balances, trades, and strategy params."""
+    from bot_engine import stop_bot, start_bot, _bot_tasks
+
+    # Stop all bots
+    result = await db.execute(select(User))
+    users = result.scalars().all()
+    for user in users:
+        if user.bot_active:
+            try:
+                await stop_bot(user.id)
+            except Exception:
+                pass
+
+    # Delete all trades
+    await db.execute(Trade.__table__.delete())
+
+    # Reset all users
+    await db.execute(
+        update(User).values(
+            demo_balance=10000.0,
+            entry_z=1.5,
+            bot_active=False,
+        )
+    )
+    await db.commit()
+
+    # Restart all bots in demo mode
+    result2 = await db.execute(select(User))
+    users2 = result2.scalars().all()
+    for user in users2:
+        await db.execute(update(User).where(User.id == user.id).values(bot_active=True))
+        await db.commit()
+        await start_bot(user.id)
+
+    return {
+        "message": "All users reset",
+        "users_reset": len(users),
+        "demo_balance": 10000.0,
+        "entry_z": 1.5,
+    }
+
+
+@router.post("/users/{user_id}/reset")
+async def admin_reset_user(
+    user_id: str,
+    admin: User = Depends(verify_admin_jwt),
+    db: AsyncSession = Depends(get_db)
+):
+    """Admin: reset a single user's balance, trades, and params."""
+    from bot_engine import stop_bot, start_bot
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(404, "User not found")
+
+    # Stop bot
+    if user.bot_active:
+        try:
+            await stop_bot(user_id)
+        except Exception:
+            pass
+
+    # Delete user's trades
+    await db.execute(Trade.__table__.delete().where(Trade.user_id == user_id))
+
+    # Reset user settings
+    await db.execute(
+        update(User).where(User.id == user_id).values(
+            demo_balance=10000.0,
+            entry_z=1.5,
+            bot_active=True,
+        )
+    )
+    await db.commit()
+
+    # Restart bot
+    await start_bot(user_id)
+
+    return {"user_id": user_id, "message": "User reset", "demo_balance": 10000.0}
