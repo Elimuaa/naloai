@@ -41,7 +41,7 @@ class User(Base):
     # Bot settings
     bot_active: Mapped[bool] = mapped_column(Boolean, default=False)
     trading_symbol: Mapped[str] = mapped_column(String, default="BTC-USD")
-    entry_z: Mapped[float] = mapped_column(Float, default=2.0)
+    entry_z: Mapped[float] = mapped_column(Float, default=1.5)
     exit_z: Mapped[float] = mapped_column(Float, default=0.5)
     lookback: Mapped[str] = mapped_column(String, default="20")
     # Research-backed defaults: 2.5% SL / 5% TP = 2:1 R/R; 1.5% trail avoids micro-volatility exits

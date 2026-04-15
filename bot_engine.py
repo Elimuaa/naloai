@@ -303,15 +303,15 @@ def _check_signal_filters(
         state.slow_z_score = slow_z
         if slow_z is not None:
             # Buy signal but slow timeframe says sell (or vice versa)
-            if side == "buy" and slow_z > 1.5:
+            if side == "buy" and slow_z > 2.0:
                 reasons.append(f"Multi-TF filter: slow Z={slow_z:.2f} says overbought (conflicting)")
-            elif side == "sell" and slow_z < -1.5:
+            elif side == "sell" and slow_z < -2.0:
                 reasons.append(f"Multi-TF filter: slow Z={slow_z:.2f} says oversold (conflicting)")
 
     # ── MARKET REGIME FILTER ──
     if state.regime in ("trending_up", "trending_down"):
         adx_val = adx(prices, 14)
-        if adx_val and adx_val > 30:
+        if adx_val and adx_val > 35:
             # Strong trend — block mean reversion unless very strong signal
             signal_strength = _calculate_signal_strength(
                 z_score, state.slow_z_score, state.regime, state.indicators, side
@@ -324,11 +324,11 @@ def _check_signal_filters(
         btc_change = (prices[-1] - prices[-10]) / prices[-10]
         eth_change = (state.eth_price_history[-1] - state.eth_price_history[-10]) / state.eth_price_history[-10]
         # If BTC and ETH are diverging significantly, market is uncertain
-        if abs(btc_change - eth_change) > 0.02:  # >2% divergence
+        if abs(btc_change - eth_change) > 0.03:  # >3% divergence
             reasons.append(f"Correlation filter: BTC/ETH diverging (BTC {btc_change:+.2%}, ETH {eth_change:+.2%})")
 
     # ── ORIGINAL FILTERS (EMA, RSI, ADX, BB, MACD) ──
-    if getattr(user, 'use_ema_filter', True):
+    if getattr(user, 'use_ema_filter', False):
         ema_50 = ema(prices, 50)
         if ema_50 is not None:
             if side == "buy" and current_price < ema_50:
