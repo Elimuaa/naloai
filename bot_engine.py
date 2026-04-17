@@ -114,27 +114,47 @@ async def start_bot(user_id: str, force_demo: bool = False):
         return {"status": "already_running"}
     state = BotState(force_demo=force_demo)
 
-    # Recover open trade state from DB to prevent duplicate entries after restart
+    # Recover open trade state from DB to prevent duplicate entries after restart.
+    # If multiple open trades exist (from prior restarts), force-close the extras.
     try:
         async with AsyncSessionLocal() as db:
             result = await db.execute(
                 select(Trade).where(Trade.user_id == user_id, Trade.state == "open")
-                .order_by(Trade.opened_at.desc()).limit(1)
+                .order_by(Trade.opened_at.desc())
             )
-            open_trade = result.scalar_one_or_none()
+            all_open = result.scalars().all()
+
+            if len(all_open) > 1:
+                # Force-close older duplicate trades — bot can only manage one at a time
+                extras = all_open[1:]
+                extra_ids = [t.id for t in extras]
+                from sqlalchemy import update as sa_update
+                await db.execute(
+                    sa_update(Trade).where(Trade.id.in_(extra_ids)).values(
+                        state="closed",
+                        exit_reason="force_closed_duplicate",
+                        closed_at=datetime.now(timezone.utc),
+                        pnl=0.0,
+                        pnl_pct=0.0,
+                    )
+                )
+                await db.commit()
+                logger.warning(f"Force-closed {len(extras)} duplicate open trades for {user_id}")
+
+            open_trade = all_open[0] if all_open else None
             if open_trade and open_trade.entry_price:
                 state.in_trade = True
                 state.entry_price = float(open_trade.entry_price)
                 state.trade_side = open_trade.side
                 state.current_trade_id = open_trade.id
                 state.current_quantity = open_trade.quantity_value or float(open_trade.quantity)
-                # Set trailing stop based on entry price (will be updated with live price in loop)
+                # Set trailing stop based on entry price (updated with live price in loop)
                 user_conf = await db.execute(select(User).where(User.id == user_id))
                 u = user_conf.scalar_one_or_none()
                 trail_pct = u.trail_stop_pct if u else 0.015
                 ep = state.entry_price
                 state.trail_stop_price = ep * (1 - trail_pct) if open_trade.side == "buy" else ep * (1 + trail_pct)
-                logger.info(f"Restored open trade {open_trade.id[:8]} for user {user_id}: {open_trade.side} @ {open_trade.entry_price}")
+                logger.info(f"Restored open trade {open_trade.id[:8]} for {user_id}: {open_trade.side} @ {open_trade.entry_price}")
     except Exception as e:
         logger.error(f"Failed to restore open trade for {user_id}: {e}")
         state.in_trade = False
@@ -809,9 +829,9 @@ async def _bot_loop(user_id: str):
                             )
 
                             # ── PREMIUM ADVANTAGE 1: Minimum signal strength gate ──
-                            # Free users take any signal that passes filters
-                            # Premium users only take high-quality signals (strength > 0.45)
-                            if is_premium_user and signal_strength < 0.45:
+                            # Live premium users only take high-quality signals (strength > 0.35)
+                            # Demo mode bypassed — let demo trade freely to show activity
+                            if is_premium_user and not is_demo and signal_strength < 0.35:
                                 state.last_signal = f"Pro filter: signal too weak ({signal_strength:.0%}), waiting for better setup"
                                 logger.info(f"Premium quality gate blocked {entry_side} for {user_id}: strength={signal_strength:.2f}")
                                 continue
