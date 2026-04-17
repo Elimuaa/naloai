@@ -176,11 +176,26 @@ async def admin_reset_all(
     # Delete all trades
     await db.execute(Trade.__table__.delete())
 
-    # Reset all users
+    # Reset all users with optimal strategy parameters
     await db.execute(
         update(User).values(
             demo_balance=10000.0,
             entry_z=1.5,
+            lookback="20",
+            stop_loss_pct=0.025,
+            take_profit_pct=0.05,
+            trail_stop_pct=0.015,
+            use_rsi_filter=True,
+            use_ema_filter=False,
+            use_adx_filter=True,
+            use_bbands_filter=True,
+            use_macd_filter=False,
+            max_drawdown_pct=8.0,
+            max_stops_before_pause=3,
+            cooldown_ticks=10,
+            risk_per_trade_pct=1.0,
+            max_exposure_pct=20.0,
+            position_size_mode="dynamic",
             bot_active=False,
         )
     )
@@ -200,6 +215,39 @@ async def admin_reset_all(
         "demo_balance": 10000.0,
         "entry_z": 1.5,
     }
+
+
+@router.post("/apply-optimal-settings")
+async def admin_apply_optimal_settings(
+    admin: User = Depends(verify_admin_jwt),
+    db: AsyncSession = Depends(get_db)
+):
+    """Admin: apply optimal strategy parameters to all users without resetting balances or trades."""
+    await db.execute(
+        update(User).values(
+            entry_z=1.5,
+            lookback="20",
+            stop_loss_pct=0.025,
+            take_profit_pct=0.05,
+            trail_stop_pct=0.015,
+            use_rsi_filter=True,
+            use_ema_filter=False,
+            use_adx_filter=True,
+            use_bbands_filter=True,
+            use_macd_filter=False,
+            max_drawdown_pct=8.0,
+            max_stops_before_pause=3,
+            cooldown_ticks=10,
+            risk_per_trade_pct=1.0,
+            max_exposure_pct=20.0,
+            position_size_mode="dynamic",
+        )
+    )
+    await db.commit()
+    return {"message": "Optimal settings applied to all users", "params": {
+        "entry_z": 1.5, "sl": "2.5%", "tp": "5.0%", "trail": "1.5%",
+        "rr_ratio": "2:1", "filters": "RSI+ADX+BBands ON, EMA OFF"
+    }}
 
 
 @router.post("/users/{user_id}/reset")
