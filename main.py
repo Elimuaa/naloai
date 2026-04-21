@@ -27,6 +27,33 @@ async def lifespan(app: FastAPI):
     await sync_clock_offset()  # Correct for system clock drift before any Robinhood calls
     await init_db()
     start_scheduler()
+
+    # ── Startup migration: apply profit-optimised settings to all users ──────
+    # Runs on every deploy. Upgrades any user still on old conservative values.
+    # Target: $200-300/day on a $10k account via 40% max exposure + 2% risk/trade.
+    from sqlalchemy import update as _up
+    PROFIT_PARAMS = dict(
+        entry_z=1.3,
+        stop_loss_pct=0.025,
+        take_profit_pct=0.05,
+        trail_stop_pct=0.015,
+        use_rsi_filter=True,
+        use_ema_filter=False,
+        use_adx_filter=True,
+        use_bbands_filter=True,
+        use_macd_filter=False,
+        max_drawdown_pct=8.0,
+        max_stops_before_pause=3,
+        cooldown_ticks=5,
+        risk_per_trade_pct=2.0,
+        max_exposure_pct=40.0,
+        position_size_mode="dynamic",
+    )
+    async with AsyncSessionLocal() as db:
+        await db.execute(_up(User).values(**PROFIT_PARAMS))
+        await db.commit()
+    logger.info("Startup: profit-optimised settings applied to all users (risk=2%, exposure=40%)")
+
     # Restore previously active bots
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(User).where(User.bot_active == True))
