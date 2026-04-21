@@ -7,6 +7,33 @@ logger = logging.getLogger(__name__)
 
 
 async def _fetch_price(symbol: str) -> float | None:
+    sym_upper = symbol.upper()
+
+    # ── Gold and NAS100 → Yahoo Finance ──
+    if sym_upper in ("GOLD", "XAU/USD", "XAUUSD"):
+        ticker = "GC%3DF"  # Gold futures
+        for base_url in ("https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"):
+            try:
+                async with httpx.AsyncClient(timeout=8, headers={"User-Agent": "Mozilla/5.0"}) as client:
+                    r = await client.get(f"{base_url}/v8/finance/chart/{ticker}")
+                    r.raise_for_status()
+                    return float(r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"])
+            except Exception as e:
+                logger.warning(f"Yahoo Finance GOLD failed ({base_url}): {e}")
+        return None
+
+    if sym_upper in ("US100", "NAS100", "NDX", "USTEC"):
+        ticker = "%5ENDX"  # NASDAQ-100 index
+        for base_url in ("https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"):
+            try:
+                async with httpx.AsyncClient(timeout=8, headers={"User-Agent": "Mozilla/5.0"}) as client:
+                    r = await client.get(f"{base_url}/v8/finance/chart/{ticker}")
+                    r.raise_for_status()
+                    return float(r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"])
+            except Exception as e:
+                logger.warning(f"Yahoo Finance US100 failed ({base_url}): {e}")
+        return None
+
     base = symbol.split("-")[0].upper()  # BTC-USD → BTC
 
     # 1. Coinbase (primary)

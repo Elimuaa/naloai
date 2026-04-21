@@ -22,28 +22,82 @@ from sqlalchemy import select, update
 logger = logging.getLogger(__name__)
 
 def _get_client(user: User, force_demo: bool = False):
-    """Return real or mock Robinhood client depending on key availability and mode.
-    Caches the client to preserve internal state (e.g. _market_data_forbidden)."""
-    cache_key = f"{user.id}:{'demo' if force_demo else 'live'}"
+    """Return broker client based on user's broker_type setting.
+    Routes to Capital.com, Tradovate, or Robinhood. Falls back to matching mock client.
+    Caches the client to preserve internal state (e.g. demo balance)."""
+    broker = getattr(user, 'broker_type', 'robinhood') or 'robinhood'
+    mode_key = 'demo' if force_demo else 'live'
+    cache_key = f"{user.id}:{broker}:{mode_key}"
+
     if cache_key in _client_cache:
         return _client_cache[cache_key]
 
     if not force_demo:
-        private_key = user.ed25519_private_key or user.rh_private_key
-        if user.rh_api_key and private_key:
-            from robinhood import create_client
-            client = create_client(user.rh_api_key, private_key)
-            if client:
-                logger.info(f"Using LIVE Robinhood client for user {user.id}")
-                _client_cache[cache_key] = client
-                return client
-            logger.error(f"Failed to create real client for user {user.id}, falling back to mock")
+        # ── Capital.com live client ──
+        if broker == 'capital':
+            if user.capital_api_key and user.capital_identifier:
+                try:
+                    from capital_client import CapitalComClient
+                    client = CapitalComClient(
+                        api_key=user.capital_api_key,
+                        identifier=user.capital_identifier,
+                        password=user.capital_password or "",
+                        demo=False,
+                    )
+                    logger.info(f"Using LIVE Capital.com client for user {user.id}")
+                    _client_cache[cache_key] = client
+                    return client
+                except Exception as e:
+                    logger.error(f"Capital.com client creation failed for {user.id}: {e}")
+            else:
+                logger.info(f"No Capital.com keys for {user.id}, using mock")
+
+        # ── Tradovate live client ──
+        elif broker == 'tradovate':
+            if user.tradovate_username and user.tradovate_password:
+                try:
+                    from tradovate_client import TradovateClient
+                    client = TradovateClient(
+                        username=user.tradovate_username,
+                        password=user.tradovate_password,
+                        account_id=user.tradovate_account_id or 0,
+                        demo=False,
+                    )
+                    logger.info(f"Using LIVE Tradovate client for user {user.id}")
+                    _client_cache[cache_key] = client
+                    return client
+                except Exception as e:
+                    logger.error(f"Tradovate client creation failed for {user.id}: {e}")
+            else:
+                logger.info(f"No Tradovate credentials for {user.id}, using mock")
+
+        # ── Robinhood live client ──
         else:
-            logger.info(f"No keys for user {user.id} (api_key={bool(user.rh_api_key)}, priv={bool(private_key)}), using mock")
+            private_key = user.ed25519_private_key or user.rh_private_key
+            if user.rh_api_key and private_key:
+                from robinhood import create_client
+                client = create_client(user.rh_api_key, private_key)
+                if client:
+                    logger.info(f"Using LIVE Robinhood client for user {user.id}")
+                    _client_cache[cache_key] = client
+                    return client
+                logger.error(f"Failed to create Robinhood client for {user.id}, falling back to mock")
+            else:
+                logger.info(f"No Robinhood keys for {user.id}, using mock")
     else:
-        logger.info(f"force_demo=True for user {user.id}, using mock")
-    from mock_robinhood import MockRobinhoodClient
-    client = MockRobinhoodClient(symbol=user.trading_symbol, balance=user.demo_balance or 10000.0)
+        logger.info(f"force_demo=True for user {user.id} (broker={broker}), using mock")
+
+    # ── Demo/mock fallback — pick matching mock client ──
+    if broker == 'capital':
+        from mock_capital_client import MockCapitalClient
+        client = MockCapitalClient(symbol=user.trading_symbol, balance=user.demo_balance or 10000.0)
+    elif broker == 'tradovate':
+        from mock_tradovate_client import MockTradovateClient
+        client = MockTradovateClient(symbol=user.trading_symbol, balance=user.demo_balance or 10000.0)
+    else:
+        from mock_robinhood import MockRobinhoodClient
+        client = MockRobinhoodClient(symbol=user.trading_symbol, balance=user.demo_balance or 10000.0)
+
     _client_cache[cache_key] = client
     return client
 
@@ -304,10 +358,14 @@ def _check_signal_filters(
     reasons = []
     current_price = prices[-1]
 
-    # ── TIME-OF-DAY FILTER ──
+    # ── TIME-OF-DAY FILTER (asset-class aware) ──
+    from broker_base import get_asset_class, ASSET_CLASS_PRESETS
+    _asset_preset = ASSET_CLASS_PRESETS[get_asset_class(getattr(user, 'trading_symbol', 'BTC-USD'))]
+    _dead_zone = _asset_preset["dead_zone_hours"]
+    _use_eth_corr = _asset_preset["use_eth_correlation"]
     current_hour = datetime.now(timezone.utc).hour
-    if current_hour in DEAD_ZONE_HOURS:
-        reasons.append(f"Time filter: {current_hour}:00 UTC is low-volume dead zone (4-8 AM)")
+    if current_hour in _dead_zone:
+        reasons.append(f"Time filter: {current_hour}:00 UTC is outside trading hours for {user.trading_symbol}")
 
     # ── CONSECUTIVE LOSS COOLDOWN (time-based) ──
     if state.last_stop_loss_time is not None:
@@ -339,8 +397,8 @@ def _check_signal_filters(
             if signal_strength < 0.7:
                 reasons.append(f"Regime filter: strong {state.regime} (ADX={adx_val:.0f}), signal only {signal_strength:.0%}")
 
-    # ── ETH CORRELATION FILTER ──
-    if len(state.eth_price_history) >= 10 and len(prices) >= 10:
+    # ── ETH CORRELATION FILTER (crypto only) ──
+    if _use_eth_corr and len(state.eth_price_history) >= 10 and len(prices) >= 10:
         btc_change = (prices[-1] - prices[-10]) / prices[-10]
         eth_change = (state.eth_price_history[-1] - state.eth_price_history[-10]) / state.eth_price_history[-10]
         # If BTC and ETH are diverging significantly, market is uncertain
@@ -499,7 +557,14 @@ async def _bot_loop(user_id: str):
                 logger.info(f"Bot disabled for user {user_id}, stopping")
                 break
 
-            is_demo = state.force_demo or not user.rh_api_key
+            broker = getattr(user, 'broker_type', 'robinhood') or 'robinhood'
+            if broker == 'capital':
+                has_live_creds = bool(user.capital_api_key and user.capital_identifier)
+            elif broker == 'tradovate':
+                has_live_creds = bool(user.tradovate_username and user.tradovate_password)
+            else:
+                has_live_creds = bool(user.rh_api_key and user.ed25519_private_key)
+            is_demo = state.force_demo or not has_live_creds
             state.demo_mode = is_demo
             POLL_INTERVAL = 6 if is_demo else 15  # 15s live for faster reaction
 
@@ -543,15 +608,18 @@ async def _bot_loop(user_id: str):
             if len(state.price_history) > 2000:
                 state.price_history = state.price_history[-2000:]
 
-            # Fetch ETH price for correlation filter
-            try:
-                eth_price = await client.get_current_price("ETH-USD")
-                if eth_price > 0:
-                    state.eth_price_history.append(eth_price)
-                    if len(state.eth_price_history) > 200:
-                        state.eth_price_history = state.eth_price_history[-200:]
-            except Exception:
-                pass
+            # Fetch ETH price for correlation filter (crypto only)
+            from broker_base import get_asset_class, ASSET_CLASS_PRESETS as _ACP
+            _use_eth_for_symbol = _ACP[get_asset_class(symbol)]["use_eth_correlation"]
+            if _use_eth_for_symbol:
+                try:
+                    eth_price = await client.get_current_price("ETH-USD")
+                    if eth_price > 0:
+                        state.eth_price_history.append(eth_price)
+                        if len(state.eth_price_history) > 200:
+                            state.eth_price_history = state.eth_price_history[-200:]
+                except Exception:
+                    pass
 
             # Auto-optimize: run quantum optimizer every N ticks (non-blocking)
             # Skip if AI calibration ran recently (within 50 ticks) to avoid param conflicts
@@ -791,7 +859,8 @@ async def _bot_loop(user_id: str):
                     state.trail_stop_price = None
                     state.current_trade_id = None
                     state.entry_z_score = None
-                    state.current_quantity = 0.0001
+                    from broker_base import get_asset_class, ASSET_CLASS_PRESETS as _FQP
+                    state.current_quantity = _FQP[get_asset_class(symbol)]["qty_step"]
 
             # ── Entry logic ──
             elif not state.in_trade:
@@ -912,9 +981,19 @@ async def _bot_loop(user_id: str):
                                     # ── PREMIUM ADVANTAGE 5: Higher confidence = bigger position ──
                                     if is_premium_user and ai_confidence > 70:
                                         strength_mult = min(1.2, strength_mult * 1.15)  # Up to 20% bigger on high-confidence
-                                    quantity = round(base_qty * strength_mult, 4)
+                                    quantity = round(base_qty * strength_mult, 8)
+
+                                # ── Asset-class quantity rounding ──
+                                from broker_base import get_asset_class, ASSET_CLASS_PRESETS as _QP
+                                _preset = _QP[get_asset_class(symbol)]
+                                _step = _preset["qty_step"]
+                                _prec = _preset["qty_precision"]
+                                quantity = max(_step, round(round(quantity / _step) * _step, _prec))
+                                if _prec == 0:
+                                    quantity = int(quantity)
+
                             state.current_quantity = quantity
-                            qty_str = f"{quantity:.8f}".rstrip('0').rstrip('.')
+                            qty_str = f"{quantity:.8f}".rstrip('0').rstrip('.') if isinstance(quantity, float) else str(quantity)
 
                             rh_order_id = ""
                             if not is_demo:

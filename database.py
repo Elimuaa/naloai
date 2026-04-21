@@ -84,6 +84,19 @@ class User(Base):
     stripe_customer_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     stripe_subscription_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    # Multi-broker support
+    broker_type: Mapped[str] = mapped_column(String, default="robinhood")  # "robinhood" | "capital" | "tradovate"
+
+    # Capital.com credentials
+    capital_api_key: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    capital_identifier: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # Capital.com login email
+    capital_password: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # Capital.com login password
+
+    # Tradovate credentials
+    tradovate_username: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    tradovate_password: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    tradovate_account_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
 
 class Trade(Base):
     __tablename__ = "trades"
@@ -187,6 +200,14 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN last_calibration_at DATETIME DEFAULT NULL",
             "ALTER TABLE users ADD COLUMN stripe_customer_id TEXT DEFAULT NULL",
             "ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT DEFAULT NULL",
+            # Multi-broker columns
+            "ALTER TABLE users ADD COLUMN broker_type TEXT DEFAULT 'robinhood'",
+            "ALTER TABLE users ADD COLUMN capital_api_key TEXT DEFAULT NULL",
+            "ALTER TABLE users ADD COLUMN capital_identifier TEXT DEFAULT NULL",
+            "ALTER TABLE users ADD COLUMN capital_password TEXT DEFAULT NULL",
+            "ALTER TABLE users ADD COLUMN tradovate_username TEXT DEFAULT NULL",
+            "ALTER TABLE users ADD COLUMN tradovate_password TEXT DEFAULT NULL",
+            "ALTER TABLE users ADD COLUMN tradovate_account_id INTEGER DEFAULT NULL",
         ]:
             try:
                 await conn.execute(text(stmt))
