@@ -25,7 +25,7 @@ ASSET_CLASS_PRESETS = {
         "qty_step": 0.0001,
         "qty_precision": 4,
         # Strategy defaults
-        "default_entry_z": 1.5,
+        "default_entry_z": 1.3,
         "default_lookback": 20,
         "default_stop_loss_pct": 0.025,
         "default_take_profit_pct": 0.05,

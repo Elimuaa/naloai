@@ -142,7 +142,7 @@ AUTO_OPTIMIZE_INTERVAL = 200
 DEAD_ZONE_HOURS = {4, 5, 6, 7}  # 4-8 AM UTC
 
 # Minimum cooldown after stop loss (seconds)
-MIN_COOLDOWN_SECONDS = 1800  # 30 minutes
+MIN_COOLDOWN_SECONDS = 900  # 15 minutes — faster re-entry after a loss
 
 bot_states: dict[str, BotState] = {}
 _bot_tasks: dict[str, asyncio.Task] = {}
@@ -151,16 +151,25 @@ _risk_managers: dict[str, RiskManager] = {}
 
 
 def _get_risk_manager(user: User) -> RiskManager:
-    """Get or create a risk manager for a user."""
-    if user.id not in _risk_managers:
-        _risk_managers[user.id] = RiskManager(
-            max_drawdown_pct=getattr(user, 'max_drawdown_pct', 5.0) or 5.0,
+    """Get or create a risk manager for a user. Always syncs live settings from DB."""
+    rm = _risk_managers.get(user.id)
+    if rm is None:
+        rm = RiskManager(
+            max_drawdown_pct=getattr(user, 'max_drawdown_pct', 8.0) or 8.0,
             max_stops_before_pause=getattr(user, 'max_stops_before_pause', 3) or 3,
             cooldown_ticks=getattr(user, 'cooldown_ticks', 5) or 5,
-            max_exposure_pct=getattr(user, 'max_exposure_pct', 20.0) or 20.0,
-            risk_per_trade_pct=getattr(user, 'risk_per_trade_pct', 1.0) or 1.0,
+            max_exposure_pct=getattr(user, 'max_exposure_pct', 40.0) or 40.0,
+            risk_per_trade_pct=getattr(user, 'risk_per_trade_pct', 2.0) or 2.0,
         )
-    return _risk_managers[user.id]
+        _risk_managers[user.id] = rm
+    else:
+        # Sync settings every tick so admin changes take effect immediately
+        rm.max_drawdown_pct = getattr(user, 'max_drawdown_pct', 8.0) or 8.0
+        rm.max_stops_before_pause = getattr(user, 'max_stops_before_pause', 3) or 3
+        rm.cooldown_ticks = getattr(user, 'cooldown_ticks', 5) or 5
+        rm.max_exposure_pct = getattr(user, 'max_exposure_pct', 40.0) or 40.0
+        rm.risk_per_trade_pct = getattr(user, 'risk_per_trade_pct', 2.0) or 2.0
+    return rm
 
 
 async def start_bot(user_id: str, force_demo: bool = False):

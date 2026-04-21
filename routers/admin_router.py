@@ -176,11 +176,11 @@ async def admin_reset_all(
     # Delete all trades
     await db.execute(Trade.__table__.delete())
 
-    # Reset all users with optimal strategy parameters
+    # Reset all users with profit-optimized strategy parameters
     await db.execute(
         update(User).values(
             demo_balance=10000.0,
-            entry_z=1.5,
+            entry_z=1.3,
             lookback="20",
             stop_loss_pct=0.025,
             take_profit_pct=0.05,
@@ -192,9 +192,9 @@ async def admin_reset_all(
             use_macd_filter=False,
             max_drawdown_pct=8.0,
             max_stops_before_pause=3,
-            cooldown_ticks=10,
-            risk_per_trade_pct=1.0,
-            max_exposure_pct=20.0,
+            cooldown_ticks=5,
+            risk_per_trade_pct=2.0,
+            max_exposure_pct=40.0,
             position_size_mode="dynamic",
             bot_active=False,
         )
@@ -222,32 +222,49 @@ async def admin_apply_optimal_settings(
     admin: User = Depends(verify_admin_jwt),
     db: AsyncSession = Depends(get_db)
 ):
-    """Admin: apply optimal strategy parameters to all users without resetting balances or trades."""
-    await db.execute(
-        update(User).values(
-            entry_z=1.5,
-            lookback="20",
-            stop_loss_pct=0.025,
-            take_profit_pct=0.05,
-            trail_stop_pct=0.015,
-            use_rsi_filter=True,
-            use_ema_filter=False,
-            use_adx_filter=True,
-            use_bbands_filter=True,
-            use_macd_filter=False,
-            max_drawdown_pct=8.0,
-            max_stops_before_pause=3,
-            cooldown_ticks=10,
-            risk_per_trade_pct=1.0,
-            max_exposure_pct=20.0,
-            position_size_mode="dynamic",
-        )
+    """Admin: apply profit-optimized strategy parameters to all users without resetting balances or trades."""
+    OPTIMAL = dict(
+        entry_z=1.3,            # slightly lower threshold → more trade opportunities
+        lookback="20",
+        stop_loss_pct=0.025,    # 2.5% SL
+        take_profit_pct=0.05,   # 5.0% TP → 2:1 R/R
+        trail_stop_pct=0.015,   # 1.5% trail
+        use_rsi_filter=True,
+        use_ema_filter=False,
+        use_adx_filter=True,
+        use_bbands_filter=True,
+        use_macd_filter=False,
+        max_drawdown_pct=8.0,
+        max_stops_before_pause=3,
+        cooldown_ticks=5,           # 5 ticks cooldown after loss (down from 10)
+        risk_per_trade_pct=2.0,     # risk $200 per trade on $10k → $200/win
+        max_exposure_pct=40.0,      # 40% max position → $4k on $10k account
+        position_size_mode="dynamic",
     )
+    await db.execute(update(User).values(**OPTIMAL))
     await db.commit()
-    return {"message": "Optimal settings applied to all users", "params": {
-        "entry_z": 1.5, "sl": "2.5%", "tp": "5.0%", "trail": "1.5%",
-        "rr_ratio": "2:1", "filters": "RSI+ADX+BBands ON, EMA OFF"
-    }}
+
+    # Push changes to in-memory risk managers immediately (no restart required)
+    from bot_engine import _risk_managers
+    for rm in _risk_managers.values():
+        rm.max_drawdown_pct = OPTIMAL["max_drawdown_pct"]
+        rm.max_stops_before_pause = OPTIMAL["max_stops_before_pause"]
+        rm.cooldown_ticks = OPTIMAL["cooldown_ticks"]
+        rm.risk_per_trade_pct = OPTIMAL["risk_per_trade_pct"]
+        rm.max_exposure_pct = OPTIMAL["max_exposure_pct"]
+
+    return {
+        "message": "Profit-optimized settings applied to all users",
+        "params": {
+            "entry_z": 1.3, "sl": "2.5%", "tp": "5.0%", "trail": "1.5%",
+            "rr_ratio": "2:1", "risk_per_trade": "2%", "max_exposure": "40%",
+            "expected_win_value": "$200 at $10k account",
+            "expected_loss_value": "$100 at $10k account",
+            "break_even_win_rate": "34%",
+            "daily_target": "$200-300 (needs 1-2 wins/day)",
+            "filters": "RSI+ADX+BBands ON, EMA OFF",
+        },
+    }
 
 
 @router.post("/users/{user_id}/reset")

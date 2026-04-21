@@ -61,11 +61,11 @@ class User(Base):
     use_volume_filter: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Risk management settings
-    max_drawdown_pct: Mapped[float] = mapped_column(Float, default=5.0)
+    max_drawdown_pct: Mapped[float] = mapped_column(Float, default=8.0)       # 8% daily drawdown limit
     max_stops_before_pause: Mapped[int] = mapped_column(Integer, default=3)
     cooldown_ticks: Mapped[int] = mapped_column(Integer, default=5)
-    risk_per_trade_pct: Mapped[float] = mapped_column(Float, default=1.0)
-    max_exposure_pct: Mapped[float] = mapped_column(Float, default=20.0)
+    risk_per_trade_pct: Mapped[float] = mapped_column(Float, default=2.0)     # 2% risk → $200/trade at $10k
+    max_exposure_pct: Mapped[float] = mapped_column(Float, default=40.0)      # 40% max → $4k position at $10k
 
     # Position sizing
     position_size_mode: Mapped[str] = mapped_column(String, default="dynamic")  # "fixed" or "dynamic"

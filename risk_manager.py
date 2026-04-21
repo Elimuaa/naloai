@@ -17,12 +17,12 @@ class RiskManager:
 
     def __init__(
         self,
-        max_drawdown_pct: float = 5.0,       # Auto-pause at -5% daily drawdown
+        max_drawdown_pct: float = 8.0,       # Auto-pause at -8% daily drawdown
         max_stops_before_pause: int = 3,       # Pause after 3 stop-losses in window
         stop_guard_window_hours: float = 4.0,  # Window for stoploss guard
         cooldown_ticks: int = 5,               # Skip N ticks after a stop-loss
-        max_exposure_pct: float = 20.0,        # Max % of balance in a single position
-        risk_per_trade_pct: float = 1.0,       # Risk 1% of balance per trade
+        max_exposure_pct: float = 40.0,        # Max 40% of balance per position → $4k on $10k
+        risk_per_trade_pct: float = 2.0,       # Risk 2% per trade → $200 risk on $10k ($200 win at 2:1)
     ):
         self.max_drawdown_pct = max_drawdown_pct
         self.max_stops_before_pause = max_stops_before_pause
