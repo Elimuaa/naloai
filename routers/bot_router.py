@@ -15,10 +15,16 @@ DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() == "true"
 
 
 def _get_live_demo_balance(user: User) -> float | None:
-    """Get live demo balance from running client if available."""
+    """Get live demo balance from running client if available.
+    Checks broker-aware key first, then legacy key as fallback."""
     try:
         from bot_engine import _client_cache
-        client = _client_cache.get(f"{user.id}:demo")
+        broker = getattr(user, 'broker_type', 'robinhood') or 'robinhood'
+        # Try broker-aware key (current format), then legacy key
+        client = (
+            _client_cache.get(f"{user.id}:{broker}:demo")
+            or _client_cache.get(f"{user.id}:demo")
+        )
         if client and hasattr(client, 'balance'):
             return round(client.balance, 2)
     except Exception:
@@ -270,11 +276,19 @@ async def get_settings(current_user: User = Depends(get_current_user)):
 
 @router.get("/balance")
 async def get_balance(current_user: User = Depends(get_current_user)):
-    if not current_user.rh_api_key:
+    broker = getattr(current_user, 'broker_type', 'robinhood') or 'robinhood'
+    has_live_creds = (
+        bool(current_user.rh_api_key) if broker == 'robinhood'
+        else bool(current_user.capital_api_key and current_user.capital_identifier) if broker == 'capital'
+        else bool(current_user.tradovate_username and current_user.tradovate_password)
+    )
+    if not has_live_creds:
         # Try to get live balance from running client first
         from bot_engine import _client_cache
-        cache_key = f"{current_user.id}:demo"
-        client = _client_cache.get(cache_key)
+        client = (
+            _client_cache.get(f"{current_user.id}:{broker}:demo")
+            or _client_cache.get(f"{current_user.id}:demo")
+        )
         if client and hasattr(client, 'balance'):
             demo_bal = round(client.balance, 2)
         else:
@@ -423,7 +437,10 @@ async def set_demo_balance(
     await db.commit()
 
     from bot_engine import _client_cache, _bot_tasks
-    _client_cache.pop(f"{current_user.id}:demo", None)
+    _broker = getattr(current_user, 'broker_type', 'robinhood') or 'robinhood'
+    for k in list(_client_cache.keys()):
+        if k.startswith(current_user.id):
+            del _client_cache[k]
 
     if current_user.id in _bot_tasks and not _bot_tasks[current_user.id].done():
         await stop_bot(current_user.id)

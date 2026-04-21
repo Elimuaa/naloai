@@ -718,9 +718,10 @@ async def _bot_loop(user_id: str):
                 for lvl in state.bearish_levels
             )
 
-            # Demo: occasionally inject a synthetic signal
+            # Demo: inject synthetic signals to ensure enough trades per day (~4-6 trades)
+            # 20% chance per tick × 10 ticks/min = ~2 signal chances/min when not in trade
             if is_demo and not state.in_trade and len(state.price_history) >= lookback:
-                if random.random() < 0.12:
+                if random.random() < 0.20:
                     if random.random() > 0.5:
                         bullish_retest = True
                         state.bullish_levels.append(current_price)
@@ -834,16 +835,27 @@ async def _bot_loop(user_id: str):
                             )
                             await db2.commit()
 
+                    # Daily target progress — compounds with balance
+                    _live_balance = client.balance if is_demo and hasattr(client, 'balance') else balance
+                    _daily_target = max(200.0, _live_balance * 0.02)   # 2% of current balance, min $200
+                    _daily_pnl = risk_mgr.daily_pnl
+                    _progress_pct = min(100.0, max(0.0, (_daily_pnl / _daily_target) * 100)) if _daily_target > 0 else 0.0
+
                     await ws_manager.send_to_user(user_id, {
                         "type": "trade_closed",
                         "symbol": symbol,
                         "exit_price": current_price,
                         "exit_reason": exit_reason,
-                        "pnl": pnl,
-                        "pnl_pct": pnl_pct,
+                        "pnl": round(pnl, 2),
+                        "pnl_pct": round(pnl_pct, 2),
                         "demo_mode": is_demo,
-                        "demo_balance": client.balance if is_demo and hasattr(client, 'balance') else None,
+                        "demo_balance": round(_live_balance, 2) if is_demo else None,
                         "risk": risk_mgr.get_status(),
+                        # Daily compounding target
+                        "daily_pnl": round(_daily_pnl, 2),
+                        "daily_target": round(_daily_target, 2),
+                        "daily_progress_pct": round(_progress_pct, 1),
+                        "daily_target_hit": _daily_pnl >= _daily_target,
                     })
 
                     # Telegram notification
@@ -1083,6 +1095,11 @@ async def _bot_loop(user_id: str):
                                     symbol, entry_side, current_price, quantity, is_demo
                                 ))
 
+            # Daily target progress for UI progress bar
+            _cur_balance = client.balance if hasattr(client, 'balance') else balance
+            _daily_target_now = max(200.0, _cur_balance * 0.02)  # 2% of current balance
+            _daily_progress = min(100.0, max(0.0, (risk_mgr.daily_pnl / _daily_target_now) * 100)) if _daily_target_now > 0 else 0.0
+
             # Send status update — hide strategy internals (z_score, indicators) from clients
             await ws_manager.send_to_user(user_id, {
                 "type": "status_update",
@@ -1093,9 +1110,13 @@ async def _bot_loop(user_id: str):
                 "trail_stop": state.trail_stop_price,
                 "last_signal": state.last_signal,
                 "demo_mode": is_demo,
-                "demo_balance": round(client.balance, 2) if is_demo and hasattr(client, 'balance') else None,
+                "demo_balance": round(_cur_balance, 2) if is_demo and hasattr(client, 'balance') else None,
                 "position_size": state.current_quantity,
                 "risk": risk_mgr.get_status(),
+                # Daily compounding target
+                "daily_pnl": round(risk_mgr.daily_pnl, 2),
+                "daily_target": round(_daily_target_now, 2),
+                "daily_progress_pct": round(_daily_progress, 1),
             })
 
         except asyncio.CancelledError:

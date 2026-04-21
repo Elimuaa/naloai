@@ -192,6 +192,10 @@ export function Dashboard() {
   const [feed, setFeed] = useState<LiveEvent[]>([])
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null)
   const [botLoading, setBotLoading] = useState(false)
+  // Daily compounding target
+  const [dailyPnl, setDailyPnl] = useState(0)
+  const [dailyTarget, setDailyTarget] = useState(200)
+  const [dailyProgressPct, setDailyProgressPct] = useState(0)
   const [settingsLoading, setSettingsLoading] = useState(false)
   const [keysLoading, setKeysLoading] = useState(false)
   const [balance, setBalance] = useState<Balance | null>(null)
@@ -371,6 +375,9 @@ export function Dashboard() {
           if (d.price) setLivePrice(d.price)
           if (typeof d.z_score === 'number') setLiveZ(d.z_score)
           if (d.demo_balance != null) setLiveDemoBalance(d.demo_balance)
+          if (typeof d.daily_pnl === 'number') setDailyPnl(d.daily_pnl)
+          if (typeof d.daily_target === 'number') setDailyTarget(d.daily_target)
+          if (typeof d.daily_progress_pct === 'number') setDailyProgressPct(d.daily_progress_pct)
           if (d.price) {
             setPriceHistory(prev => [...prev.slice(-120), { time: new Date().toLocaleTimeString(), price: d.price, z: d.z_score }])
           }
@@ -384,7 +391,11 @@ export function Dashboard() {
         } else if (d.type === 'trade_closed') {
           const pnl = (typeof d.pnl === 'number' && !isNaN(d.pnl)) ? d.pnl : 0
           if (d.demo_balance != null) setLiveDemoBalance(d.demo_balance)
-          addFeed('trade_closed', `Closed (${d.exit_reason}) P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}${d.demo_mode ? ' [DEMO]' : ''}`, pnl >= 0 ? 'text-profit' : 'text-loss')
+          if (typeof d.daily_pnl === 'number') setDailyPnl(d.daily_pnl)
+          if (typeof d.daily_target === 'number') setDailyTarget(d.daily_target)
+          if (typeof d.daily_progress_pct === 'number') setDailyProgressPct(d.daily_progress_pct)
+          const targetMsg = d.daily_target_hit ? ' 🎯 Daily target hit!' : ` | Day: ${d.daily_progress_pct?.toFixed(0) ?? 0}% of $${d.daily_target?.toFixed(0) ?? 200}`
+          addFeed('trade_closed', `Closed (${d.exit_reason}) P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}${d.demo_mode ? ' [DEMO]' : ''}${targetMsg}`, pnl >= 0 ? 'text-profit' : 'text-loss')
           loadData()
         } else if (d.type === 'ai_analysis_ready') {
           addFeed('ai', `AI graded last trade: ${d.analysis?.grade ?? 'N/A'}`, 'text-purple-400')
@@ -891,9 +902,35 @@ export function Dashboard() {
                   )
                 })()}
 
+                {/* Daily Compounding Target Progress */}
+                {botStatus?.running && (
+                  <div className="mt-4 pt-4 border-t border-border">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <p className="text-xs font-semibold text-muted uppercase tracking-wider">Daily Target</p>
+                      <span className={`text-xs font-mono font-bold ${dailyPnl >= dailyTarget ? 'text-profit' : dailyPnl > 0 ? 'text-warning' : 'text-muted'}`}>
+                        {dailyPnl >= 0 ? '+' : ''}${dailyPnl.toFixed(2)} / ${dailyTarget.toFixed(0)}
+                      </span>
+                    </div>
+                    <div className="h-2 rounded-full bg-elevated overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-500 ${dailyPnl >= dailyTarget ? 'bg-profit' : 'bg-accent'}`}
+                        style={{ width: `${Math.min(100, Math.max(0, dailyProgressPct))}%` }}
+                      />
+                    </div>
+                    <div className="flex justify-between mt-1">
+                      <span className="text-xs text-muted">{dailyProgressPct.toFixed(0)}% of goal</span>
+                      {dailyPnl >= dailyTarget
+                        ? <span className="text-xs text-profit font-semibold">🎯 Target hit!</span>
+                        : <span className="text-xs text-muted">${Math.max(0, dailyTarget - dailyPnl).toFixed(0)} to go</span>
+                      }
+                    </div>
+                    <p className="text-xs text-muted/60 mt-1">Target compounds with balance (2%/day)</p>
+                  </div>
+                )}
+
                 {/* Balance */}
                 <div className="mt-4 pt-4 border-t border-border">
-                  <p className="text-xs font-semibold text-muted mb-2 uppercase tracking-wider">{isDemo ? 'Demo Balance' : 'Robinhood Balance'}</p>
+                  <p className="text-xs font-semibold text-muted mb-2 uppercase tracking-wider">{isDemo ? 'Demo Balance' : 'Live Balance'}</p>
                   {isDemo ? (
                     <div className="p-3 rounded-xl bg-elevated mb-2">
                       <p className="text-xs text-muted mb-1">Paper Trading Balance</p>
