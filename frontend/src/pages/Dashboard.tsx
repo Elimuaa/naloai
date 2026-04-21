@@ -118,6 +118,9 @@ interface Settings {
   fixed_quantity?: number
   telegram_enabled?: boolean
   telegram_configured?: boolean
+  broker_type?: string
+  has_capital_keys?: boolean
+  has_tradovate_keys?: boolean
 }
 
 interface Balance {
@@ -239,6 +242,23 @@ export function Dashboard() {
   const [telegramToken, setTelegramToken] = useState('')
   const [telegramChatId, setTelegramChatId] = useState('')
   const [telegramLoading, setTelegramLoading] = useState(false)
+  // Broker selector
+  const [formBroker, setFormBroker] = useState<'robinhood' | 'capital' | 'tradovate'>('robinhood')
+  const [brokerKeysTab, setBrokerKeysTab] = useState<'robinhood' | 'capital' | 'tradovate'>('robinhood')
+  // Capital.com credentials form
+  const [capitalApiKey, setCapitalApiKey] = useState('')
+  const [capitalIdentifier, setCapitalIdentifier] = useState('')
+  const [capitalPassword, setCapitalPassword] = useState('')
+  const [capitalKeyLoading, setCapitalKeyLoading] = useState(false)
+  const [capitalTestLoading, setCapitalTestLoading] = useState(false)
+  const [capitalTestResult, setCapitalTestResult] = useState<{ ok: boolean; msg: string } | null>(null)
+  // Tradovate credentials form
+  const [tradovateUsername, setTradovateUsername] = useState('')
+  const [tradovatePassword, setTradovatePassword] = useState('')
+  const [tradovateAccountId, setTradovateAccountId] = useState('')
+  const [tradovateKeyLoading, setTradovateKeyLoading] = useState(false)
+  const [tradovateTestLoading, setTradovateTestLoading] = useState(false)
+  const [tradovateTestResult, setTradovateTestResult] = useState<{ ok: boolean; msg: string } | null>(null)
 
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -294,6 +314,10 @@ export function Dashboard() {
       setFormFixedQty(s.fixed_quantity ?? 0.0001)
       // Telegram
       setFormTelegramEnabled(s.telegram_enabled ?? false)
+      // Broker
+      const broker = (s.broker_type as 'robinhood' | 'capital' | 'tradovate') ?? 'robinhood'
+      setFormBroker(broker)
+      setBrokerKeysTab(broker)
 
       api.get('/api/bot/balance').then(r => {
         setBalance(r.data)
@@ -502,6 +526,7 @@ export function Dashboard() {
       cooldown_ticks: formCooldown, risk_per_trade_pct: formRiskPerTrade, max_exposure_pct: formMaxExposure,
       position_size_mode: formPosMode, fixed_quantity: formFixedQty,
       telegram_enabled: formTelegramEnabled,
+      broker_type: formBroker,
     })
     setShowConfirm(true)
   }
@@ -530,6 +555,48 @@ export function Dashboard() {
       } else { setTestResult({ ok: false, msg: res.data.error ?? 'Connection failed' }) }
     } catch { setTestResult({ ok: false, msg: 'Request failed' }) }
     finally { setTestLoading(false) }
+  }
+
+  const saveCapitalKeys = async () => {
+    if (!capitalApiKey || !capitalIdentifier || !capitalPassword) return showToast('All Capital.com fields required', false)
+    setCapitalKeyLoading(true); setCapitalTestResult(null)
+    try {
+      await api.post('/api/bot/capital-keys', { capital_api_key: capitalApiKey, capital_identifier: capitalIdentifier, capital_password: capitalPassword })
+      showToast('Capital.com credentials saved!')
+      setFormBroker('capital')
+      await loadData()
+    } catch { showToast('Failed to save Capital.com credentials', false) }
+    finally { setCapitalKeyLoading(false) }
+  }
+
+  const testCapitalConnection = async () => {
+    setCapitalTestLoading(true); setCapitalTestResult(null)
+    try {
+      const res = await api.post('/api/bot/test-capital-connection')
+      setCapitalTestResult({ ok: res.data.ok, msg: res.data.message ?? res.data.error ?? '' })
+    } catch { setCapitalTestResult({ ok: false, msg: 'Request failed' }) }
+    finally { setCapitalTestLoading(false) }
+  }
+
+  const saveTradovateKeys = async () => {
+    if (!tradovateUsername || !tradovatePassword || !tradovateAccountId) return showToast('All Tradovate fields required', false)
+    setTradovateKeyLoading(true); setTradovateTestResult(null)
+    try {
+      await api.post('/api/bot/tradovate-keys', { tradovate_username: tradovateUsername, tradovate_password: tradovatePassword, tradovate_account_id: parseInt(tradovateAccountId) })
+      showToast('Tradovate credentials saved!')
+      setFormBroker('tradovate')
+      await loadData()
+    } catch { showToast('Failed to save Tradovate credentials', false) }
+    finally { setTradovateKeyLoading(false) }
+  }
+
+  const testTradovateConnection = async () => {
+    setTradovateTestLoading(true); setTradovateTestResult(null)
+    try {
+      const res = await api.post('/api/bot/test-tradovate-connection')
+      setTradovateTestResult({ ok: res.data.ok, msg: res.data.message ?? res.data.error ?? '' })
+    } catch { setTradovateTestResult({ ok: false, msg: 'Request failed' }) }
+    finally { setTradovateTestLoading(false) }
   }
 
   const saveTelegram = async () => {
@@ -1131,38 +1198,156 @@ export function Dashboard() {
         {activeTab === 'settings' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
 
-            {/* API Keys */}
+            {/* API Keys — 3-tab broker card */}
             <div className="bg-card border border-border rounded-2xl p-5">
-              <h3 className="font-semibold mb-4 text-sm flex items-center gap-2">Robinhood API Setup {user?.has_api_keys && <span className="text-xs text-profit">configured</span>}</h3>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-xs text-muted mb-1.5">Your Public Key <span className="text-muted/60">(register on Robinhood)</span></label>
-                  <div className="flex gap-2">
-                    <input type="text" readOnly value={settings?.public_key ?? ''} className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-xs font-mono focus:outline-none" />
-                    <button onClick={() => { navigator.clipboard.writeText(settings?.public_key ?? ''); showToast('Copied!') }} className="flex-shrink-0 px-3 py-2.5 rounded-xl bg-elevated border border-border text-muted hover:text-white text-xs">Copy</button>
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-xs text-muted mb-1.5">Robinhood API Key</label>
-                  <input type="text" value={rhApiKey} onChange={e => setRhApiKey(e.target.value)} placeholder="rh-api-key-..." className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
-                </div>
-                <div className="flex gap-2">
-                  <button onClick={saveKeys} disabled={keysLoading} className="px-5 py-2.5 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 transition-colors text-sm font-medium">{keysLoading ? 'Saving...' : 'Save API Key'}</button>
-                  {settings?.has_api_keys && <button onClick={testConnection} disabled={testLoading} className="px-4 py-2.5 rounded-xl bg-elevated border border-border hover:border-accent/50 disabled:opacity-50 text-sm font-medium text-muted hover:text-white">{testLoading ? 'Testing...' : 'Test Connection'}</button>}
-                </div>
-                {testResult && <div className={`px-3 py-2 rounded-lg text-xs ${testResult.ok ? 'bg-profit/10 border border-profit/30 text-profit' : 'bg-loss/10 border border-loss/30 text-loss'}`}>{testResult.ok ? '\u2713 ' : '\u2717 '}{testResult.msg}</div>}
+              <h3 className="font-semibold mb-3 text-sm">Broker API Setup</h3>
+              {/* Broker tab selector */}
+              <div className="flex gap-1.5 mb-4 p-1 bg-elevated rounded-xl">
+                {(['robinhood', 'capital', 'tradovate'] as const).map(b => (
+                  <button key={b} onClick={() => setBrokerKeysTab(b)}
+                    className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-colors ${brokerKeysTab === b ? 'bg-accent text-white' : 'text-muted hover:text-white'}`}>
+                    {b === 'robinhood' ? '🪙 Robinhood' : b === 'capital' ? '📈 Capital.com' : '⚡ Tradovate'}
+                  </button>
+                ))}
               </div>
+
+              {/* ── Robinhood tab ── */}
+              {brokerKeysTab === 'robinhood' && (
+                <div className="space-y-3">
+                  <p className="text-xs text-muted">Trade BTC, ETH, SOL, DOGE via Robinhood Crypto.</p>
+                  <div>
+                    <label className="block text-xs text-muted mb-1.5">Your Public Key <span className="text-muted/60">(register on Robinhood)</span></label>
+                    <div className="flex gap-2">
+                      <input type="text" readOnly value={settings?.public_key ?? ''} className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-xs font-mono focus:outline-none" />
+                      <button onClick={() => { navigator.clipboard.writeText(settings?.public_key ?? ''); showToast('Copied!') }} className="flex-shrink-0 px-3 py-2.5 rounded-xl bg-elevated border border-border text-muted hover:text-white text-xs">Copy</button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-muted mb-1.5">Robinhood API Key</label>
+                    <input type="text" value={rhApiKey} onChange={e => setRhApiKey(e.target.value)} placeholder="rh-api-key-..." className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={saveKeys} disabled={keysLoading} className="px-5 py-2.5 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 transition-colors text-sm font-medium">{keysLoading ? 'Saving...' : 'Save Key'}</button>
+                    {settings?.has_api_keys && brokerKeysTab === 'robinhood' && <button onClick={testConnection} disabled={testLoading} className="px-4 py-2.5 rounded-xl bg-elevated border border-border hover:border-accent/50 disabled:opacity-50 text-sm font-medium text-muted hover:text-white">{testLoading ? 'Testing...' : 'Test'}</button>}
+                  </div>
+                  {testResult && <div className={`px-3 py-2 rounded-lg text-xs ${testResult.ok ? 'bg-profit/10 border border-profit/30 text-profit' : 'bg-loss/10 border border-loss/30 text-loss'}`}>{testResult.ok ? '✓ ' : '✗ '}{testResult.msg}</div>}
+                </div>
+              )}
+
+              {/* ── Capital.com tab ── */}
+              {brokerKeysTab === 'capital' && (
+                <div className="space-y-3">
+                  <p className="text-xs text-muted">Trade Gold (XAU/USD) and NAS100 as CFDs. Global access, FCA/CySEC regulated.</p>
+                  <div className="px-3 py-2 rounded-xl bg-accent/5 border border-accent/20 text-xs text-muted">
+                    Get your API key: <span className="text-accent">capital.com → Settings → API Integrations → Generate Key</span>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-muted mb-1.5">API Key</label>
+                    <input type="text" value={capitalApiKey} onChange={e => setCapitalApiKey(e.target.value)} placeholder="your-capital-api-key" className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm font-mono placeholder-muted/40 focus:outline-none focus:border-accent" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-muted mb-1.5">Login Email</label>
+                    <input type="email" value={capitalIdentifier} onChange={e => setCapitalIdentifier(e.target.value)} placeholder="you@example.com" className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-muted mb-1.5">Login Password</label>
+                    <input type="password" value={capitalPassword} onChange={e => setCapitalPassword(e.target.value)} placeholder="••••••••" className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={saveCapitalKeys} disabled={capitalKeyLoading} className="px-5 py-2.5 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 transition-colors text-sm font-medium">{capitalKeyLoading ? 'Saving...' : 'Save Keys'}</button>
+                    {settings?.has_capital_keys && <button onClick={testCapitalConnection} disabled={capitalTestLoading} className="px-4 py-2.5 rounded-xl bg-elevated border border-border hover:border-accent/50 disabled:opacity-50 text-sm font-medium text-muted hover:text-white">{capitalTestLoading ? 'Testing...' : 'Test Connection'}</button>}
+                  </div>
+                  {capitalTestResult && <div className={`px-3 py-2 rounded-lg text-xs ${capitalTestResult.ok ? 'bg-profit/10 border border-profit/30 text-profit' : 'bg-loss/10 border border-loss/30 text-loss'}`}>{capitalTestResult.ok ? '✓ ' : '✗ '}{capitalTestResult.msg}</div>}
+                </div>
+              )}
+
+              {/* ── Tradovate tab ── */}
+              {brokerKeysTab === 'tradovate' && (
+                <div className="space-y-3">
+                  <p className="text-xs text-muted">Trade Gold Futures (GC) and NAS100 Futures (NQ). US-regulated CME exchange.</p>
+                  <div className="px-3 py-2 rounded-xl bg-accent/5 border border-accent/20 text-xs text-muted">
+                    Account ID is shown in Tradovate platform under <span className="text-accent">Account → Account Details</span>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-muted mb-1.5">Username</label>
+                    <input type="text" value={tradovateUsername} onChange={e => setTradovateUsername(e.target.value)} placeholder="your_tradovate_username" className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-muted mb-1.5">Password</label>
+                    <input type="password" value={tradovatePassword} onChange={e => setTradovatePassword(e.target.value)} placeholder="••••••••" className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-muted mb-1.5">Account ID</label>
+                    <input type="number" value={tradovateAccountId} onChange={e => setTradovateAccountId(e.target.value)} placeholder="12345" className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={saveTradovateKeys} disabled={tradovateKeyLoading} className="px-5 py-2.5 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 transition-colors text-sm font-medium">{tradovateKeyLoading ? 'Saving...' : 'Save Keys'}</button>
+                    {settings?.has_tradovate_keys && <button onClick={testTradovateConnection} disabled={tradovateTestLoading} className="px-4 py-2.5 rounded-xl bg-elevated border border-border hover:border-accent/50 disabled:opacity-50 text-sm font-medium text-muted hover:text-white">{tradovateTestLoading ? 'Testing...' : 'Test Connection'}</button>}
+                  </div>
+                  {tradovateTestResult && <div className={`px-3 py-2 rounded-lg text-xs ${tradovateTestResult.ok ? 'bg-profit/10 border border-profit/30 text-profit' : 'bg-loss/10 border border-loss/30 text-loss'}`}>{tradovateTestResult.ok ? '✓ ' : '✗ '}{tradovateTestResult.msg}</div>}
+                </div>
+              )}
             </div>
 
             {/* Bot Settings */}
             <div className="bg-card border border-border rounded-2xl p-5">
               <h3 className="font-semibold mb-4 text-sm">Trading Settings</h3>
               <div className="space-y-4">
+                {/* Broker selector */}
                 <div>
-                  <label className="block text-xs text-muted mb-1.5">Trading Pair</label>
+                  <label className="block text-xs text-muted mb-1.5">Broker</label>
+                  <div className="flex gap-1.5 p-1 bg-elevated rounded-xl">
+                    {([
+                      { val: 'robinhood', label: '🪙 Robinhood Crypto' },
+                      { val: 'capital',   label: '📈 Capital.com' },
+                      { val: 'tradovate', label: '⚡ Tradovate' },
+                    ] as const).map(b => (
+                      <button key={b.val} onClick={() => {
+                        setFormBroker(b.val)
+                        // Reset symbol to first option for this broker
+                        const first = b.val === 'robinhood' ? 'BTC-USD' : b.val === 'capital' ? 'GOLD' : 'GC'
+                        setFormSymbol(first)
+                      }}
+                        className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-colors ${formBroker === b.val ? 'bg-accent text-white' : 'text-muted hover:text-white'}`}>
+                        {b.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs text-muted mb-1.5">Trading Pair / Instrument</label>
                   <select value={formSymbol} onChange={e => setFormSymbol(e.target.value)} className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm focus:outline-none focus:border-accent">
-                    {['BTC-USD', 'ETH-USD', 'SOL-USD', 'DOGE-USD'].map(s => <option key={s} value={s}>{s}</option>)}
+                    {formBroker === 'robinhood' && ['BTC-USD', 'ETH-USD', 'SOL-USD', 'DOGE-USD'].map(s => <option key={s} value={s}>{s}</option>)}
+                    {formBroker === 'capital' && [
+                      { v: 'GOLD',  l: 'Gold (XAU/USD) — CFD' },
+                      { v: 'US100', l: 'NASDAQ 100 (US100) — CFD' },
+                    ].map(s => <option key={s.v} value={s.v}>{s.l}</option>)}
+                    {formBroker === 'tradovate' && [
+                      { v: 'GC', l: 'Gold Futures (GC)' },
+                      { v: 'NQ', l: 'NASDAQ 100 Futures (NQ)' },
+                    ].map(s => <option key={s.v} value={s.v}>{s.l}</option>)}
                   </select>
+                </div>
+                {/* Strategy presets by asset class */}
+                <div>
+                  <label className="block text-xs text-muted mb-1.5">Strategy Preset</label>
+                  <div className="flex gap-2 flex-wrap">
+                    {formBroker === 'robinhood' && (
+                      <button onClick={() => { setFormStopLoss(0.025); setFormTakeProfit(0.05); setFormTrailStop(0.015) }}
+                        className="px-3 py-1.5 text-xs rounded-lg bg-elevated border border-border hover:border-accent/50 text-muted hover:text-white transition-colors">
+                        Crypto defaults (SL 2.5% / TP 5%)
+                      </button>
+                    )}
+                    {(formBroker === 'capital' || formBroker === 'tradovate') && [
+                      { label: 'Gold defaults', sl: 0.008, tp: 0.016, trail: 0.005 },
+                      { label: 'NAS100 defaults', sl: 0.005, tp: 0.012, trail: 0.004 },
+                    ].map(p => (
+                      <button key={p.label} onClick={() => { setFormStopLoss(p.sl); setFormTakeProfit(p.tp); setFormTrailStop(p.trail) }}
+                        className="px-3 py-1.5 text-xs rounded-lg bg-elevated border border-border hover:border-accent/50 text-muted hover:text-white transition-colors">
+                        {p.label} (SL {(p.sl * 100).toFixed(1)}% / TP {(p.tp * 100).toFixed(1)}%)
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 <div className="grid grid-cols-3 gap-3">
                   {[
