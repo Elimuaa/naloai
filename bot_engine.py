@@ -133,6 +133,11 @@ class BotState:
         # AI screening
         self.last_ai_screen: Optional[dict] = None
         self.trades_since_optimize: int = 0
+        # ── Profitability enhancements ──
+        self.breakeven_moved: bool = False          # True once SL moved to entry
+        self.trade_open_time: Optional[float] = None  # time.time() when trade opened
+        self.consecutive_wins: int = 0             # reset on loss, increment on win
+        self.bb_width_history: list[float] = []    # rolling BB-width for squeeze filter
 
 
 # Auto-optimization interval (run quantum optimizer every N ticks)
@@ -774,8 +779,44 @@ async def _bot_loop(user_id: str):
                 sl = ep * (1 - stop_loss_pct) if state.trade_side == "buy" else ep * (1 + stop_loss_pct)
                 tp = ep * (1 + take_profit_pct) if state.trade_side == "buy" else ep * (1 - take_profit_pct)
 
+                # ── BREAKEVEN STOP: move SL to entry once 50% of TP distance is captured ──
+                if not state.breakeven_moved and ep > 0:
+                    tp_dist = abs(tp - ep)
+                    profit_captured = (
+                        (current_price - ep) if state.trade_side == "buy"
+                        else (ep - current_price)
+                    )
+                    if profit_captured >= tp_dist * 0.50:
+                        # Slide the static SL to entry (lock-in breakeven)
+                        if state.trade_side == "buy":
+                            sl = max(sl, ep)  # SL can only move up
+                        else:
+                            sl = min(sl, ep)  # SL can only move down
+                        state.breakeven_moved = True
+                        logger.info(f"Breakeven stop activated for {user_id} @ entry={ep:.4f}")
+                        await ws_manager.send_to_user(user_id, {
+                            "type": "status_update_minor",
+                            "message": f"🔒 Breakeven locked — SL moved to entry ${ep:,.2f}",
+                        })
+                elif state.breakeven_moved and ep > 0:
+                    # Keep enforcing breakeven floor on subsequent ticks
+                    if state.trade_side == "buy":
+                        sl = max(sl, ep)
+                    else:
+                        sl = min(sl, ep)
+
+                # ── TIME-IN-TRADE LIMIT: close after 4 hours to free up capital ──
+                _time_limit_exit = False
+                if state.trade_open_time is not None:
+                    _elapsed_hours = (time.time() - state.trade_open_time) / 3600
+                    if _elapsed_hours >= 4.0:
+                        _time_limit_exit = True
+                        logger.info(f"Time-limit exit for {user_id}: trade open {_elapsed_hours:.1f}h")
+
                 exit_reason = None
-                if state.trade_side == "buy":
+                if _time_limit_exit:
+                    exit_reason = "time_limit"
+                elif state.trade_side == "buy":
                     if current_price <= sl:
                         exit_reason = "stop_loss"
                     elif current_price >= tp:
@@ -823,13 +864,15 @@ async def _bot_loop(user_id: str):
                     # Update risk manager
                     risk_mgr.record_trade_close(pnl, exit_reason)
 
-                    # Track consecutive losses and cooldown
+                    # Track consecutive losses/wins and cooldown
                     if pnl < 0:
                         state.consecutive_losses += 1
+                        state.consecutive_wins = 0
                         if exit_reason == "stop_loss":
                             state.last_stop_loss_time = time.time()
                     else:
                         state.consecutive_losses = 0
+                        state.consecutive_wins += 1
 
                     # Record pattern for AI memory
                     record_pattern(user_id, {
@@ -893,222 +936,262 @@ async def _bot_loop(user_id: str):
                     state.trail_stop_price = None
                     state.current_trade_id = None
                     state.entry_z_score = None
+                    state.breakeven_moved = False
+                    state.trade_open_time = None
                     from broker_base import get_asset_class, ASSET_CLASS_PRESETS as _FQP
                     state.current_quantity = _FQP[get_asset_class(symbol)]["qty_step"]
 
             # ── Entry logic ──
             elif not state.in_trade:
-                # Check risk manager first
-                can_trade, risk_reason = risk_mgr.can_trade()
-                if not can_trade:
-                    state.last_signal = f"Paused: {risk_reason}"
+                # ── DAILY PROFIT TARGET STOP: protect locked-in gains ──
+                _cur_bal_entry = client.balance if hasattr(client, 'balance') else balance
+                _daily_tgt_entry = max(200.0, _cur_bal_entry * 0.02)
+                _daily_target_hit = risk_mgr.daily_pnl >= _daily_tgt_entry
+                if _daily_target_hit:
+                    state.last_signal = (
+                        f"🎯 Daily target ${_daily_tgt_entry:,.0f} hit "
+                        f"(+${risk_mgr.daily_pnl:,.2f}) — protecting gains until tomorrow"
+                    )
+                    # Bot stays active but won't enter new trades today
                 else:
-                    entry_side = None
-                    signal = None
-                    if bullish_retest:
-                        entry_side = "buy"
-                        signal = f"Bullish retest @ ${current_price:,.2f} (Z={z_score:.2f})"
-                    elif bearish_retest:
-                        entry_side = "sell"
-                        signal = f"Bearish retest @ ${current_price:,.2f} (Z={z_score:.2f})"
+                    # Check risk manager
+                    can_trade, risk_reason = risk_mgr.can_trade()
+                    if not can_trade:
+                        state.last_signal = f"Paused: {risk_reason}"
+                    else:
+                        entry_side = None
+                        signal = None
+                        if bullish_retest:
+                            entry_side = "buy"
+                            signal = f"Bullish retest @ ${current_price:,.2f} (Z={z_score:.2f})"
+                        elif bearish_retest:
+                            entry_side = "sell"
+                            signal = f"Bearish retest @ ${current_price:,.2f} (Z={z_score:.2f})"
 
-                    if entry_side:
-                        # Apply indicator filters (now includes multi-TF, regime, time, correlation)
-                        passed, filter_reasons = _check_signal_filters(
-                            state.price_history, entry_side, user, state, z_score
-                        )
-                        is_premium_user = getattr(user, 'is_premium', False)
-
-                        if not passed and not is_demo:
-                            state.last_signal = f"Signal filtered: {filter_reasons[0]}"
-                            logger.info(f"Signal filtered for {user_id}: {filter_reasons}")
-                        elif not passed and is_demo and random.random() > 0.3:
-                            state.last_signal = f"Signal filtered: {filter_reasons[0]}"
-                        else:
-                            # Calculate signal strength for position sizing
-                            signal_strength = _calculate_signal_strength(
-                                z_score, state.slow_z_score, state.regime,
-                                state.indicators, entry_side
+                        if entry_side:
+                            # Apply indicator filters (now includes multi-TF, regime, time, correlation)
+                            passed, filter_reasons = _check_signal_filters(
+                                state.price_history, entry_side, user, state, z_score
                             )
+                            is_premium_user = getattr(user, 'is_premium', False)
 
-                            # ── PREMIUM ADVANTAGE 1: Minimum signal strength gate ──
-                            # Live premium users only take high-quality signals (strength > 0.35)
-                            # Demo mode bypassed — let demo trade freely to show activity
-                            if is_premium_user and not is_demo and signal_strength < 0.35:
-                                state.last_signal = f"Pro filter: signal too weak ({signal_strength:.0%}), waiting for better setup"
-                                logger.info(f"Premium quality gate blocked {entry_side} for {user_id}: strength={signal_strength:.2f}")
-                                continue
+                            # ── VOLATILITY SQUEEZE FILTER: skip entries when BB too narrow ──
+                            # Low BB width = market coiled / indecisive → signals are low quality
+                            if passed:
+                                _bb_now = bollinger_bands(state.price_history, int(getattr(user, 'lookback', 20)))
+                                if _bb_now is not None and current_price > 0:
+                                    _bb_w = (_bb_now["upper"] - _bb_now["lower"]) / current_price
+                                    state.bb_width_history.append(_bb_w)
+                                    if len(state.bb_width_history) > 50:
+                                        state.bb_width_history.pop(0)
+                                    if len(state.bb_width_history) >= 20:
+                                        _avg_bb_w = sum(state.bb_width_history) / len(state.bb_width_history)
+                                        if _bb_w < _avg_bb_w * 0.50:  # width < 50% of avg = squeeze
+                                            passed = False
+                                            filter_reasons = [f"Volatility squeeze: BB width {_bb_w:.4f} < 50% of avg {_avg_bb_w:.4f} — market coiling"]
 
-                            # ── PREMIUM ADVANTAGE 2: AI Pre-trade screening ──
-                            ai_approved = True
-                            ai_confidence = 0
-                            if is_premium_user and os.getenv("ANTHROPIC_API_KEY"):
-                                try:
-                                    async with AsyncSessionLocal() as screen_db:
-                                        recent_r = await screen_db.execute(
-                                            select(Trade).where(
-                                                Trade.user_id == user_id,
-                                                Trade.state == "closed"
-                                            ).order_by(Trade.closed_at.desc()).limit(10)
-                                        )
-                                        recent_trades = [{
-                                            "side": t.side, "pnl": t.pnl or 0,
-                                            "exit_reason": t.exit_reason
-                                        } for t in recent_r.scalars().all()]
-
-                                    screen_result = await screen_trade(
-                                        user_id, entry_side, current_price,
-                                        z_score, state.indicators, recent_trades,
-                                        state.regime, signal_strength
-                                    )
-                                    state.last_ai_screen = screen_result
-                                    ai_confidence = screen_result.get("confidence", 50)
-                                    if not screen_result.get("take", True):
-                                        ai_approved = False
-                                        state.last_signal = f"AI blocked: {screen_result.get('reasoning', 'low confidence')}"
-                                        logger.info(f"AI screen blocked trade for {user_id}: {screen_result}")
-
-                                    # ── PREMIUM ADVANTAGE 3: AI-adjusted risk params ──
-                                    # If AI suggests tighter SL/TP, use them
-                                    if ai_approved and screen_result.get("adjusted_sl"):
-                                        suggested_sl = float(screen_result["adjusted_sl"])
-                                        if 0.005 < suggested_sl < stop_loss_pct:
-                                            stop_loss_pct = suggested_sl
-                                            logger.info(f"AI tightened SL to {suggested_sl:.3f} for {user_id}")
-                                    if ai_approved and screen_result.get("adjusted_tp"):
-                                        suggested_tp = float(screen_result["adjusted_tp"])
-                                        if suggested_tp > take_profit_pct:
-                                            take_profit_pct = suggested_tp
-                                            logger.info(f"AI widened TP to {suggested_tp:.3f} for {user_id}")
-                                except Exception as e:
-                                    logger.debug(f"AI screen error: {e}")
-
-                            # ── PREMIUM ADVANTAGE 4: Pattern memory filter ──
-                            if is_premium_user and ai_approved:
-                                try:
-                                    insights = get_pattern_insights(user_id)
-                                    current_hour = datetime.now(timezone.utc).hour
-                                    # Check if this hour+side combo has >65% loss rate
-                                    if insights.get("bad_hours") and current_hour in insights["bad_hours"]:
-                                        state.last_signal = f"Pattern memory: hour {current_hour} UTC historically loses"
-                                        logger.info(f"Pattern memory blocked {entry_side} at hour {current_hour} for {user_id}")
-                                        continue
-                                except Exception:
-                                    pass
-
-                            if not ai_approved:
-                                pass  # Skip entry — AI blocked it
+                            if not passed and not is_demo:
+                                state.last_signal = f"Signal filtered: {filter_reasons[0]}"
+                                logger.info(f"Signal filtered for {user_id}: {filter_reasons}")
+                            elif not passed and is_demo and random.random() > 0.3:
+                                state.last_signal = f"Signal filtered: {filter_reasons[0]}"
                             else:
-                                logger.info(f"Entering {entry_side} for {user_id} @ {current_price} (strength={signal_strength:.0%}, regime={state.regime}, premium={is_premium_user})")
-                                state.last_signal = signal
+                                # Calculate signal strength for position sizing
+                                signal_strength = _calculate_signal_strength(
+                                    z_score, state.slow_z_score, state.regime,
+                                    state.indicators, entry_side
+                                )
 
-                                # Signal-strength position sizing
-                                pos_mode = getattr(user, 'position_size_mode', 'dynamic') or 'dynamic'
-                                if pos_mode == "fixed":
-                                    quantity = getattr(user, 'fixed_quantity', 0.0001) or 0.0001
+                                # ── PREMIUM ADVANTAGE 1: Minimum signal strength gate ──
+                                # Live premium users only take high-quality signals (strength > 0.35)
+                                # Demo mode bypassed — let demo trade freely to show activity
+                                if is_premium_user and not is_demo and signal_strength < 0.35:
+                                    state.last_signal = f"Pro filter: signal too weak ({signal_strength:.0%}), waiting for better setup"
+                                    logger.info(f"Premium quality gate blocked {entry_side} for {user_id}: strength={signal_strength:.2f}")
+                                    continue
+
+                                # ── PREMIUM ADVANTAGE 2: AI Pre-trade screening ──
+                                ai_approved = True
+                                ai_confidence = 0
+                                if is_premium_user and os.getenv("ANTHROPIC_API_KEY"):
+                                    try:
+                                        async with AsyncSessionLocal() as screen_db:
+                                            recent_r = await screen_db.execute(
+                                                select(Trade).where(
+                                                    Trade.user_id == user_id,
+                                                    Trade.state == "closed"
+                                                ).order_by(Trade.closed_at.desc()).limit(10)
+                                            )
+                                            recent_trades = [{
+                                                "side": t.side, "pnl": t.pnl or 0,
+                                                "exit_reason": t.exit_reason
+                                            } for t in recent_r.scalars().all()]
+
+                                        screen_result = await screen_trade(
+                                            user_id, entry_side, current_price,
+                                            z_score, state.indicators, recent_trades,
+                                            state.regime, signal_strength
+                                        )
+                                        state.last_ai_screen = screen_result
+                                        ai_confidence = screen_result.get("confidence", 50)
+                                        if not screen_result.get("take", True):
+                                            ai_approved = False
+                                            state.last_signal = f"AI blocked: {screen_result.get('reasoning', 'low confidence')}"
+                                            logger.info(f"AI screen blocked trade for {user_id}: {screen_result}")
+
+                                        # ── PREMIUM ADVANTAGE 3: AI-adjusted risk params ──
+                                        # If AI suggests tighter SL/TP, use them
+                                        if ai_approved and screen_result.get("adjusted_sl"):
+                                            suggested_sl = float(screen_result["adjusted_sl"])
+                                            if 0.005 < suggested_sl < stop_loss_pct:
+                                                stop_loss_pct = suggested_sl
+                                                logger.info(f"AI tightened SL to {suggested_sl:.3f} for {user_id}")
+                                        if ai_approved and screen_result.get("adjusted_tp"):
+                                            suggested_tp = float(screen_result["adjusted_tp"])
+                                            if suggested_tp > take_profit_pct:
+                                                take_profit_pct = suggested_tp
+                                                logger.info(f"AI widened TP to {suggested_tp:.3f} for {user_id}")
+                                    except Exception as e:
+                                        logger.debug(f"AI screen error: {e}")
+
+                                # ── PREMIUM ADVANTAGE 4: Pattern memory filter ──
+                                if is_premium_user and ai_approved:
+                                    try:
+                                        insights = get_pattern_insights(user_id)
+                                        current_hour = datetime.now(timezone.utc).hour
+                                        # Check if this hour+side combo has >65% loss rate
+                                        if insights.get("bad_hours") and current_hour in insights["bad_hours"]:
+                                            state.last_signal = f"Pattern memory: hour {current_hour} UTC historically loses"
+                                            logger.info(f"Pattern memory blocked {entry_side} at hour {current_hour} for {user_id}")
+                                            continue
+                                    except Exception:
+                                        pass
+
+                                if not ai_approved:
+                                    pass  # Skip entry — AI blocked it
                                 else:
-                                    base_qty = risk_mgr.calculate_position_size(
-                                        balance, current_price, stop_loss_pct, state.price_history
-                                    )
-                                    # Scale by signal strength: 50% at 0.3 strength, 100% at 0.7+
-                                    strength_mult = min(1.0, max(0.5, signal_strength / 0.7))
-                                    # ── PREMIUM ADVANTAGE 5: Higher confidence = bigger position ──
-                                    if is_premium_user and ai_confidence > 70:
-                                        strength_mult = min(1.2, strength_mult * 1.15)  # Up to 20% bigger on high-confidence
-                                    # ── Golden hour boost: up to 25% larger during best hours ──
-                                    strength_mult = min(1.5, strength_mult * _golden_boost)
-                                    quantity = round(base_qty * strength_mult, 8)
+                                    logger.info(f"Entering {entry_side} for {user_id} @ {current_price} (strength={signal_strength:.0%}, regime={state.regime}, premium={is_premium_user})")
+                                    state.last_signal = signal
 
-                                # ── Asset-class quantity rounding ──
-                                from broker_base import get_asset_class, ASSET_CLASS_PRESETS as _QP
-                                _preset = _QP[get_asset_class(symbol)]
-                                _step = _preset["qty_step"]
-                                _prec = _preset["qty_precision"]
-                                quantity = max(_step, round(round(quantity / _step) * _step, _prec))
-                                if _prec == 0:
-                                    quantity = int(quantity)
-
-                            state.current_quantity = quantity
-                            qty_str = f"{quantity:.8f}".rstrip('0').rstrip('.') if isinstance(quantity, float) else str(quantity)
-
-                            rh_order_id = ""
-                            if not is_demo:
-                                try:
-                                    order = await client.place_market_order(symbol, entry_side, qty_str)
-                                    rh_order_id = order.get("id", "")
-                                except Exception as e:
-                                    logger.error(f"Live order failed for {user_id}: {e}")
-                                    err_msg = str(e)
-                                    if "403" in err_msg or "401" in err_msg:
-                                        await ws_manager.send_to_user(user_id, {
-                                            "type": "bot_error",
-                                            "message": f"Order rejected by Robinhood: {err_msg[:120]}. Check your API key permissions.",
-                                        })
+                                    # Signal-strength position sizing
+                                    pos_mode = getattr(user, 'position_size_mode', 'dynamic') or 'dynamic'
+                                    if pos_mode == "fixed":
+                                        quantity = getattr(user, 'fixed_quantity', 0.0001) or 0.0001
                                     else:
-                                        await ws_manager.send_to_user(user_id, {
-                                            "type": "bot_error",
-                                            "message": f"Order failed: {err_msg[:120]}",
-                                        })
-                                    continue
+                                        base_qty = risk_mgr.calculate_position_size(
+                                            balance, current_price, stop_loss_pct, state.price_history
+                                        )
+                                        # Scale by signal strength: 50% at 0.3 strength, 100% at 0.7+
+                                        strength_mult = min(1.0, max(0.5, signal_strength / 0.7))
+                                        # ── PREMIUM ADVANTAGE 5: Higher confidence = bigger position ──
+                                        if is_premium_user and ai_confidence > 70:
+                                            strength_mult = min(1.2, strength_mult * 1.15)  # Up to 20% bigger on high-confidence
+                                        # ── Golden hour boost: up to 25% larger during best hours ──
+                                        strength_mult = min(1.5, strength_mult * _golden_boost)
+                                        # ── LOSING STREAK REDUCTION: size down after 2 consecutive losses ──
+                                        if state.consecutive_losses >= 2:
+                                            _loss_mult = 0.60
+                                            strength_mult *= _loss_mult
+                                            logger.info(f"Streak reduction ({state.consecutive_losses} losses): sizing at {_loss_mult:.0%}")
+                                        # ── WINNER STREAK BOOST: size up slightly after 3 consecutive wins ──
+                                        elif state.consecutive_wins >= 3:
+                                            _win_mult = min(1.10, 1.0 + (state.consecutive_wins - 2) * 0.03)
+                                            strength_mult = min(1.5, strength_mult * _win_mult)
+                                            logger.info(f"Streak boost ({state.consecutive_wins} wins): sizing at {strength_mult:.0%}")
+                                        quantity = round(base_qty * strength_mult, 8)
 
-                            # In demo mode, execute mock order and check for rejection
-                            if is_demo:
-                                demo_order = await client.place_market_order(symbol, entry_side, qty_str)
-                                if demo_order.get("state") == "rejected":
-                                    logger.warning(f"Demo order rejected for {user_id[:8]}: {demo_order.get('reason')}")
-                                    state.last_signal = f"Order rejected: {demo_order.get('reason', 'insufficient balance')}"
-                                    continue
+                                    # ── Asset-class quantity rounding ──
+                                    from broker_base import get_asset_class, ASSET_CLASS_PRESETS as _QP
+                                    _preset = _QP[get_asset_class(symbol)]
+                                    _step = _preset["qty_step"]
+                                    _prec = _preset["qty_precision"]
+                                    quantity = max(_step, round(round(quantity / _step) * _step, _prec))
+                                    if _prec == 0:
+                                        quantity = int(quantity)
 
-                            # Save indicators snapshot with trade
-                            ind_snapshot = json.dumps({
-                                k: (round(v, 4) if isinstance(v, (int, float)) else v)
-                                for k, v in state.indicators.items()
-                            })
+                                    state.current_quantity = quantity
+                                    qty_str = f"{quantity:.8f}".rstrip('0').rstrip('.') if isinstance(quantity, float) else str(quantity)
 
-                            trade_id = await _save_trade(user_id, {
-                                "symbol": symbol,
-                                "side": entry_side,
-                                "quantity": qty_str,
-                                "quantity_value": quantity,
-                                "entry_price": str(current_price),
-                                "state": "open",
-                                "is_demo": is_demo,
-                                "rh_order_id": rh_order_id,
-                                "indicators_snapshot": ind_snapshot,
-                                "opened_at": datetime.now(timezone.utc),
-                            })
-                            state.in_trade = True
-                            state.entry_price = current_price
-                            state.trade_side = entry_side
-                            state.entry_z_score = z_score
-                            state.current_trade_id = trade_id
-                            state.trail_stop_price = (
-                                current_price * (1 - adaptive_trail) if entry_side == "buy"
-                                else current_price * (1 + adaptive_trail)
-                            )
-                            # Persist demo balance after entry deduction
-                            if is_demo and hasattr(client, 'balance'):
-                                async with AsyncSessionLocal() as db2:
-                                    await db2.execute(
-                                        update(User).where(User.id == user_id).values(demo_balance=round(client.balance, 2))
+                                    rh_order_id = ""
+                                    if not is_demo:
+                                        try:
+                                            order = await client.place_market_order(symbol, entry_side, qty_str)
+                                            rh_order_id = order.get("id", "")
+                                        except Exception as e:
+                                            logger.error(f"Live order failed for {user_id}: {e}")
+                                            err_msg = str(e)
+                                            if "403" in err_msg or "401" in err_msg:
+                                                await ws_manager.send_to_user(user_id, {
+                                                    "type": "bot_error",
+                                                    "message": f"Order rejected by Robinhood: {err_msg[:120]}. Check your API key permissions.",
+                                                })
+                                            else:
+                                                await ws_manager.send_to_user(user_id, {
+                                                    "type": "bot_error",
+                                                    "message": f"Order failed: {err_msg[:120]}",
+                                                })
+                                            continue
+
+                                    # In demo mode, execute mock order and check for rejection
+                                    if is_demo:
+                                        demo_order = await client.place_market_order(symbol, entry_side, qty_str)
+                                        if demo_order.get("state") == "rejected":
+                                            logger.warning(f"Demo order rejected for {user_id[:8]}: {demo_order.get('reason')}")
+                                            state.last_signal = f"Order rejected: {demo_order.get('reason', 'insufficient balance')}"
+                                            continue
+
+                                    # Save indicators snapshot with trade
+                                    ind_snapshot = json.dumps({
+                                        k: (round(v, 4) if isinstance(v, (int, float)) else v)
+                                        for k, v in state.indicators.items()
+                                    })
+
+                                    trade_id = await _save_trade(user_id, {
+                                        "symbol": symbol,
+                                        "side": entry_side,
+                                        "quantity": qty_str,
+                                        "quantity_value": quantity,
+                                        "entry_price": str(current_price),
+                                        "state": "open",
+                                        "is_demo": is_demo,
+                                        "rh_order_id": rh_order_id,
+                                        "indicators_snapshot": ind_snapshot,
+                                        "opened_at": datetime.now(timezone.utc),
+                                    })
+                                    state.in_trade = True
+                                    state.entry_price = current_price
+                                    state.trade_side = entry_side
+                                    state.entry_z_score = z_score
+                                    state.current_trade_id = trade_id
+                                    state.trade_open_time = time.time()   # ← time-limit tracking
+                                    state.breakeven_moved = False          # ← reset for new trade
+                                    state.trail_stop_price = (
+                                        current_price * (1 - adaptive_trail) if entry_side == "buy"
+                                        else current_price * (1 + adaptive_trail)
                                     )
-                                    await db2.commit()
+                                    # Persist demo balance after entry deduction
+                                    if is_demo and hasattr(client, 'balance'):
+                                        async with AsyncSessionLocal() as db2:
+                                            await db2.execute(
+                                                update(User).where(User.id == user_id).values(demo_balance=round(client.balance, 2))
+                                            )
+                                            await db2.commit()
 
-                            await ws_manager.send_to_user(user_id, {
-                                "type": "trade_opened",
-                                "symbol": symbol,
-                                "side": entry_side,
-                                "entry_price": current_price,
-                                "demo_mode": is_demo,
-                                "quantity": quantity,
-                                "demo_balance": round(client.balance, 2) if is_demo and hasattr(client, 'balance') else None,
-                            })
+                                    await ws_manager.send_to_user(user_id, {
+                                        "type": "trade_opened",
+                                        "symbol": symbol,
+                                        "side": entry_side,
+                                        "entry_price": current_price,
+                                        "demo_mode": is_demo,
+                                        "quantity": quantity,
+                                        "demo_balance": round(client.balance, 2) if is_demo and hasattr(client, 'balance') else None,
+                                    })
 
-                            # Telegram notification
-                            if getattr(user, 'telegram_enabled', False):
-                                asyncio.create_task(notifications.notify_trade_opened(
-                                    symbol, entry_side, current_price, quantity, is_demo
-                                ))
+                                    # Telegram notification
+                                    if getattr(user, 'telegram_enabled', False):
+                                        asyncio.create_task(notifications.notify_trade_opened(
+                                            symbol, entry_side, current_price, quantity, is_demo
+                                        ))
 
             # Daily target progress for UI progress bar
             _cur_balance = client.balance if hasattr(client, 'balance') else balance
