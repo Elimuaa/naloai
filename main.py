@@ -52,7 +52,11 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as db:
         await db.execute(_up(User).values(**PROFIT_PARAMS))
         await db.commit()
-    logger.info("Startup: profit-optimised settings applied to all users (risk=2%, exposure=40%)")
+    logger.info(
+        "Startup: profit-optimised settings applied — "
+        "risk=2%, exposure=40%, entry_z=1.3, dead_zone={1,6,9,11,13,14,17,18}, "
+        "golden_hours={7,8,15,19,20}"
+    )
 
     # Restore previously active bots
     async with AsyncSessionLocal() as db:

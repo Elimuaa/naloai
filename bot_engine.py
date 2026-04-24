@@ -138,8 +138,10 @@ class BotState:
 # Auto-optimization interval (run quantum optimizer every N ticks)
 AUTO_OPTIMIZE_INTERVAL = 200
 
-# Dead zone hours (UTC) — low volume, avoid trading
-DEAD_ZONE_HOURS = {4, 5, 6, 7}  # 4-8 AM UTC
+# Dead zone hours (UTC) — data-driven from 14-month BTC audit (RC Quantum Signal Engine)
+# Losing hours identified: 1,6,9,11,13,14,17,18
+# Previously wrong {4,5,6,7} — was blocking profitable hours 4,5,7 and missing 9,11,13,14,17,18
+DEAD_ZONE_HOURS = {1, 6, 9, 11, 13, 14, 17, 18}
 
 # Minimum cooldown after stop loss (seconds)
 MIN_COOLDOWN_SECONDS = 900  # 15 minutes — faster re-entry after a loss
@@ -588,12 +590,23 @@ async def _bot_loop(user_id: str):
             risk_mgr.reset_daily(balance)
 
             symbol = user.trading_symbol
-            entry_z_thresh = user.entry_z
             lookback = int(user.lookback)
             stop_loss_pct = user.stop_loss_pct
             take_profit_pct = user.take_profit_pct
             trail_stop_pct = user.trail_stop_pct
             tolerance_pct = 0.005 if is_demo else 0.01
+
+            # ── Golden hour scaling (data-driven from 14-month BTC audit) ──
+            # Best UTC hours by avg P/L: 8($80), 20($76), 15($55), 19($55), 7($36)
+            # During these hours: lower entry threshold + allow up to 25% larger position
+            _now_hour = datetime.now(timezone.utc).hour
+            GOLDEN_HOURS = {7, 8, 15, 19, 20}
+            if _now_hour in GOLDEN_HOURS:
+                entry_z_thresh = max(0.9, user.entry_z * 0.80)  # 20% lower threshold
+                _golden_boost = 1.25   # 25% larger position
+            else:
+                entry_z_thresh = user.entry_z
+                _golden_boost = 1.0
 
             current_price = await client.get_current_price(symbol)
             if not is_demo and state.key_invalid:
@@ -1002,6 +1015,8 @@ async def _bot_loop(user_id: str):
                                     # ── PREMIUM ADVANTAGE 5: Higher confidence = bigger position ──
                                     if is_premium_user and ai_confidence > 70:
                                         strength_mult = min(1.2, strength_mult * 1.15)  # Up to 20% bigger on high-confidence
+                                    # ── Golden hour boost: up to 25% larger during best hours ──
+                                    strength_mult = min(1.5, strength_mult * _golden_boost)
                                     quantity = round(base_qty * strength_mult, 8)
 
                                 # ── Asset-class quantity rounding ──

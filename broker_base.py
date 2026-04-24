@@ -17,8 +17,13 @@ def get_asset_class(symbol: str) -> str:
 
 ASSET_CLASS_PRESETS = {
     "crypto": {
-        # Time of day filter: avoid 4-8 AM UTC (low volume)
-        "dead_zone_hours": {4, 5, 6, 7},
+        # ── Data-driven hour filter (derived from 14-month BTC 15M audit) ──
+        # Avg P/L per trade by UTC hour — source: RC Quantum BTC Signal Engine
+        # Profitable hours:  0,2,3,4,5,7,8,10,12,15,16,19,20,21,22,23  → TRADE
+        # Losing hours:      1,6,9,11,13,14,17,18                       → BLOCK
+        # Worst offender: hour 11 UTC (-$92.60/trade avg) — previously unblocked
+        # Previously wrong: blocked 4,5,7 (all profitable) → fixed
+        "dead_zone_hours": {1, 6, 9, 11, 13, 14, 17, 18},
         # Correlate with ETH for divergence filter
         "use_eth_correlation": True,
         # Position quantity precision
