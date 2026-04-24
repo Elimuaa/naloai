@@ -138,6 +138,11 @@ class BotState:
         self.trade_open_time: Optional[float] = None  # time.time() when trade opened
         self.consecutive_wins: int = 0             # reset on loss, increment on win
         self.bb_width_history: list[float] = []    # rolling BB-width for squeeze filter
+        # Partial profit taking
+        self.partial_exit_done: bool = False        # True once 50% has been closed at 1R
+        self.initial_quantity: float = 0.0          # full size at entry; remaining = current_quantity
+        # Adaptive R/R per trade
+        self.adaptive_tp_pct: Optional[float] = None  # locked at entry based on regime
 
 
 # Auto-optimization interval (run quantum optimizer every N ticks)
@@ -287,6 +292,31 @@ def get_bot_status(user_id: str) -> dict:
         "position_size": state.current_quantity,
         "risk": risk_mgr.get_status() if risk_mgr else None,
     }
+
+
+def _adaptive_rr(base_sl_pct: float, base_tp_pct: float, regime: str, side: str) -> tuple[float, float]:
+    """Adjust SL/TP based on current market regime.
+
+    Ranging markets: widen TP to let mean-reversion run (2.5× SL).
+    Trending with us: let it ride (3.0× SL).
+    Trending against us: tight exit (1.5× SL) — don't fight the trend.
+    Volatile: standard (2.0× SL).
+
+    Returns (sl_pct, tp_pct).
+    """
+    if regime == "ranging":
+        # Mean-reversion sweet spot — widen TP
+        return base_sl_pct, base_sl_pct * 2.5
+    if regime == "trending_up":
+        if side == "buy":
+            return base_sl_pct, base_sl_pct * 3.0   # ride the trend
+        return base_sl_pct, base_sl_pct * 1.5       # against trend — exit fast
+    if regime == "trending_down":
+        if side == "sell":
+            return base_sl_pct, base_sl_pct * 3.0
+        return base_sl_pct, base_sl_pct * 1.5
+    # volatile / unknown — use user's setting
+    return base_sl_pct, base_tp_pct
 
 
 def _calculate_zscore(prices: list[float], lookback: int) -> Optional[float]:
@@ -776,8 +806,75 @@ async def _bot_loop(user_id: str):
             # ── Exit logic ──
             if state.in_trade and state.entry_price and state.current_trade_id:
                 ep = state.entry_price
+                # Use regime-adaptive TP locked at entry (falls back to user setting if not set)
+                _tp_pct_active = state.adaptive_tp_pct if state.adaptive_tp_pct else take_profit_pct
                 sl = ep * (1 - stop_loss_pct) if state.trade_side == "buy" else ep * (1 + stop_loss_pct)
-                tp = ep * (1 + take_profit_pct) if state.trade_side == "buy" else ep * (1 - take_profit_pct)
+                tp = ep * (1 + _tp_pct_active) if state.trade_side == "buy" else ep * (1 - _tp_pct_active)
+
+                # ── PARTIAL PROFIT AT 1R: close 50% of position once 1× SL distance in profit ──
+                # This locks in guaranteed profit on every trade that reaches the 1R checkpoint,
+                # regardless of where it ends up. Transforms a mediocre win-rate into a profitable
+                # distribution — the #1 professional edge.
+                if not state.partial_exit_done and state.initial_quantity > 0:
+                    one_r_move = stop_loss_pct  # 1× stop distance in %
+                    profit_pct_now = (
+                        (current_price - ep) / ep if state.trade_side == "buy"
+                        else (ep - current_price) / ep
+                    )
+                    if profit_pct_now >= one_r_move:
+                        # Close 50% of the position
+                        half_qty = round(state.initial_quantity * 0.50, 8)
+                        from broker_base import get_asset_class, ASSET_CLASS_PRESETS as _PP
+                        _pres = _PP[get_asset_class(symbol)]
+                        half_qty = max(_pres["qty_step"], round(round(half_qty / _pres["qty_step"]) * _pres["qty_step"], _pres["qty_precision"]))
+                        if _pres["qty_precision"] == 0:
+                            half_qty = int(half_qty)
+
+                        close_side = "sell" if state.trade_side == "buy" else "buy"
+                        try:
+                            # Execute partial close — same on demo and live
+                            await client.place_market_order(symbol, close_side, str(half_qty))
+
+                            # Record partial P&L (doesn't close the trade — position continues)
+                            partial_diff = (
+                                (current_price - ep) if state.trade_side == "buy"
+                                else (ep - current_price)
+                            )
+                            partial_pnl = partial_diff * half_qty
+                            risk_mgr.daily_pnl += partial_pnl   # book the locked profit
+
+                            # Reduce remaining quantity
+                            state.current_quantity = max(
+                                _pres["qty_step"],
+                                round(state.initial_quantity - half_qty, 8)
+                            )
+                            if _pres["qty_precision"] == 0:
+                                state.current_quantity = int(state.current_quantity)
+                            state.partial_exit_done = True
+
+                            # Persist demo balance after partial close
+                            if is_demo and hasattr(client, 'balance'):
+                                async with AsyncSessionLocal() as db2:
+                                    await db2.execute(
+                                        update(User).where(User.id == user_id).values(demo_balance=round(client.balance, 2))
+                                    )
+                                    await db2.commit()
+
+                            logger.info(
+                                f"Partial exit {user_id}: closed {half_qty} @ {current_price}, "
+                                f"booked +${partial_pnl:.2f}, remaining {state.current_quantity}"
+                            )
+                            await ws_manager.send_to_user(user_id, {
+                                "type": "partial_exit",
+                                "symbol": symbol,
+                                "price": current_price,
+                                "closed_qty": half_qty,
+                                "remaining_qty": state.current_quantity,
+                                "partial_pnl": round(partial_pnl, 2),
+                                "message": f"💰 Locked +${partial_pnl:.2f} (50% sold at 1R). Runner on remainder.",
+                            })
+                        except Exception as _e:
+                            logger.warning(f"Partial-exit order failed for {user_id}: {_e}")
 
                 # ── BREAKEVEN STOP: move SL to entry once 50% of TP distance is captured ──
                 if not state.breakeven_moved and ep > 0:
@@ -938,6 +1035,9 @@ async def _bot_loop(user_id: str):
                     state.entry_z_score = None
                     state.breakeven_moved = False
                     state.trade_open_time = None
+                    state.partial_exit_done = False
+                    state.initial_quantity = 0.0
+                    state.adaptive_tp_pct = None
                     from broker_base import get_asset_class, ASSET_CLASS_PRESETS as _FQP
                     state.current_quantity = _FQP[get_asset_class(symbol)]["qty_step"]
 
@@ -1098,6 +1198,12 @@ async def _bot_loop(user_id: str):
                                             _win_mult = min(1.10, 1.0 + (state.consecutive_wins - 2) * 0.03)
                                             strength_mult = min(1.5, strength_mult * _win_mult)
                                             logger.info(f"Streak boost ({state.consecutive_wins} wins): sizing at {strength_mult:.0%}")
+                                        # ── KELLY-ADJUSTED SIZING: auto-defend when edge shrinks ──
+                                        # Shrinks position when rolling win-rate/RR deteriorates.
+                                        _kelly_mult = risk_mgr.kelly_fraction()
+                                        strength_mult *= _kelly_mult
+                                        if _kelly_mult < 0.7 or _kelly_mult > 1.2:
+                                            logger.info(f"Kelly adjustment: {_kelly_mult:.2f}× (edge signal)")
                                         quantity = round(base_qty * strength_mult, 8)
 
                                     # ── Asset-class quantity rounding ──
@@ -1165,6 +1271,12 @@ async def _bot_loop(user_id: str):
                                     state.current_trade_id = trade_id
                                     state.trade_open_time = time.time()   # ← time-limit tracking
                                     state.breakeven_moved = False          # ← reset for new trade
+                                    state.partial_exit_done = False        # ← reset partial-profit flag
+                                    state.initial_quantity = quantity      # remember full size
+                                    # ── ADAPTIVE R/R: lock TP based on current regime at entry ──
+                                    _sl_adj, _tp_adj = _adaptive_rr(stop_loss_pct, take_profit_pct, state.regime, entry_side)
+                                    state.adaptive_tp_pct = _tp_adj
+                                    logger.info(f"Adaptive R/R for {user_id}: regime={state.regime} SL={_sl_adj:.3f} TP={_tp_adj:.3f}")
                                     state.trail_stop_price = (
                                         current_price * (1 - adaptive_trail) if entry_side == "buy"
                                         else current_price * (1 + adaptive_trail)

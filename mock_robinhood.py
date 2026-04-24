@@ -115,12 +115,26 @@ class MockRobinhoodClient:
         return {"id": order_id, "state": "filled"}
 
     async def place_market_order(self, symbol: str, side: str, asset_quantity: str) -> dict:
-        price = await _fetch_real_price(symbol)
+        import random
+        mid_price = await _fetch_real_price(symbol)
         qty = float(asset_quantity)
         order_id = str(uuid.uuid4())
 
+        # ── REALISTIC EXECUTION: slippage + fees ──
+        # Slippage: 2-5 bps uniform-random adverse fill (buys fill higher, sells lower)
+        # Fees: 0.10% per side (Robinhood crypto taker fee approximation)
+        SLIPPAGE_BPS = 2 + random.random() * 3   # 2-5 bps
+        FEE_PCT = 0.001                           # 10 bps per side
+        slip_frac = SLIPPAGE_BPS / 10000.0
         if side == "buy":
-            cost = price * qty
+            fill_price = mid_price * (1 + slip_frac)  # pay higher
+        else:
+            fill_price = mid_price * (1 - slip_frac)  # receive lower
+
+        if side == "buy":
+            notional = fill_price * qty
+            fee = notional * FEE_PCT
+            cost = notional + fee
             if cost > self.balance:
                 logger.warning(f"Insufficient demo balance: need ${cost:,.2f}, have ${self.balance:,.2f}")
                 return {"id": order_id, "state": "rejected", "reason": "insufficient_balance"}
@@ -130,11 +144,16 @@ class MockRobinhoodClient:
             held = self._holdings.get(symbol, 0)
             if qty > held:
                 qty = held  # Can only sell what we hold
-            proceeds = price * qty
+            notional = fill_price * qty
+            fee = notional * FEE_PCT
+            proceeds = notional - fee
             self.balance += proceeds
             self._holdings[symbol] = max(0, held - qty)
 
-        logger.info(f"Mock order: {side} {asset_quantity} {symbol} @ ${price:,.2f} | balance: ${self.balance:,.2f}")
+        logger.info(
+            f"Mock order: {side} {asset_quantity} {symbol} @ ${fill_price:,.2f} "
+            f"(mid=${mid_price:,.2f}, slip={SLIPPAGE_BPS:.1f}bps, fee=${fee:.2f}) | balance: ${self.balance:,.2f}"
+        )
         await asyncio.sleep(0.05)  # Minimal simulated latency
         return {
             "id": order_id,
@@ -142,7 +161,7 @@ class MockRobinhoodClient:
             "side": side,
             "type": "market",
             "state": "filled",
-            "average_price": str(price),
+            "average_price": str(fill_price),
             "quantity": asset_quantity,
         }
 

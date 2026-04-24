@@ -40,6 +40,49 @@ class RiskManager:
         self.is_paused: bool = False
         self.pause_reason: str = ""
 
+        # Rolling trade stats for Kelly Criterion sizing
+        # Stores last 30 closed trades as (pnl, was_win) tuples
+        self.recent_trades: list[tuple[float, bool]] = []
+
+    def kelly_fraction(self) -> float:
+        """Compute Kelly-fraction based on recent trade history.
+
+        Kelly = (p*b - (1-p)) / b
+          p = win rate over last 30 trades
+          b = avg_win / avg_loss ratio
+        Uses half-Kelly (0.5× multiplier) for safety.
+        Clamped to [0.25, 1.5] — never goes below 25% or above 150% of base size.
+
+        When edge shrinks (low win-rate or small wins), fraction drops → auto-defense.
+        When edge grows, fraction rises up to 1.5× → auto-offense.
+        """
+        if len(self.recent_trades) < 10:
+            return 1.0  # Not enough data yet — use base size
+
+        wins = [t[0] for t in self.recent_trades if t[1]]
+        losses = [abs(t[0]) for t in self.recent_trades if not t[1] and t[0] < 0]
+
+        if not wins or not losses:
+            return 1.0
+
+        p = len(wins) / len(self.recent_trades)          # win rate
+        avg_win = sum(wins) / len(wins)
+        avg_loss = sum(losses) / len(losses)
+        if avg_loss <= 0:
+            return 1.0
+        b = avg_win / avg_loss                             # reward/risk ratio
+
+        kelly = (p * b - (1 - p)) / b                     # raw Kelly
+        half_kelly = max(0.0, kelly * 0.5)                # half-Kelly for safety
+
+        # Express as multiplier vs base risk_per_trade_pct (e.g. 2%)
+        # half_kelly of 0.02 = 2% risk = 1.0× base
+        base = self.risk_per_trade_pct / 100.0
+        if base <= 0:
+            return 1.0
+        multiplier = half_kelly / base
+        return max(0.25, min(1.5, multiplier))
+
     def reset_daily(self, balance: float):
         """Reset daily tracking. Call at start of each trading day."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -56,6 +99,11 @@ class RiskManager:
     def record_trade_close(self, pnl: float, exit_reason: str):
         """Record a closed trade for risk tracking."""
         self.daily_pnl += pnl
+
+        # Track for Kelly sizing — keep rolling last 30 trades
+        self.recent_trades.append((pnl, pnl > 0))
+        if len(self.recent_trades) > 30:
+            self.recent_trades.pop(0)
 
         if exit_reason == "stop_loss":
             self.stop_loss_times.append(datetime.now(timezone.utc))
