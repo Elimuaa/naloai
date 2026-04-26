@@ -32,23 +32,48 @@ interface Summary {
   monthly_premium_revenue: number
 }
 
+interface PeriodStats {
+  trades: number
+  wins: number
+  losses: number
+  win_rate_pct: number
+  total_pnl: number
+  demo_pnl: number
+  live_pnl: number
+  partial_pnl_locked: number
+  avg_pnl_per_trade: number
+}
+
+interface TodayStats {
+  as_of_utc: string
+  active_bots: number
+  open_positions: number
+  trades_opened_today: number
+  today: PeriodStats
+  last_7_days: PeriodStats
+  all_time: PeriodStats
+}
+
 export function AdminDashboard() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
   const [users, setUsers] = useState<UserRow[]>([])
   const [summary, setSummary] = useState<Summary | null>(null)
+  const [todayStats, setTodayStats] = useState<TodayStats | null>(null)
   const [loading, setLoading] = useState(true)
   const [toggleLoading, setToggleLoading] = useState<string | null>(null)
   const [search, setSearch] = useState('')
 
   const loadData = useCallback(async () => {
     try {
-      const [usersRes, summaryRes] = await Promise.all([
+      const [usersRes, summaryRes, todayRes] = await Promise.all([
         api.get('/api/admin/users'),
         api.get('/api/admin/summary'),
+        api.get('/api/admin/today-stats').catch(() => null),
       ])
       setUsers(usersRes.data.users || [])
       setSummary(summaryRes.data)
+      if (todayRes) setTodayStats(todayRes.data)
     } catch (err) {
       console.error('Admin load failed:', err)
     } finally {
@@ -142,6 +167,109 @@ export function AdminDashboard() {
                 <p className={`text-2xl font-bold font-mono ${card.color}`}>{card.value}</p>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Live Performance Panels */}
+        {todayStats && (
+          <div className="space-y-4">
+            {/* Live activity strip */}
+            <div className="bg-gradient-to-r from-accent/10 via-purple-500/10 to-profit/10 border border-accent/30 rounded-2xl p-5">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="font-bold text-sm flex items-center gap-2" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>
+                  <span className="w-2 h-2 rounded-full bg-profit animate-pulse"></span>
+                  Live Platform Pulse
+                </h2>
+                <span className="text-xs text-muted font-mono">{new Date(todayStats.as_of_utc).toLocaleString()}</span>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div>
+                  <p className="text-xs text-muted mb-1">Active Bots</p>
+                  <p className="text-2xl font-bold font-mono text-profit">{todayStats.active_bots}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted mb-1">Open Positions</p>
+                  <p className="text-2xl font-bold font-mono text-warning">{todayStats.open_positions}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted mb-1">Trades Opened Today</p>
+                  <p className="text-2xl font-bold font-mono text-accent">{todayStats.trades_opened_today}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted mb-1">Trades Closed Today</p>
+                  <p className="text-2xl font-bold font-mono">{todayStats.today.trades}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Period stats: Today / 7d / All-time */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {[
+                { label: 'Today', stats: todayStats.today, accent: 'text-profit', border: 'border-profit/30' },
+                { label: 'Last 7 Days', stats: todayStats.last_7_days, accent: 'text-accent', border: 'border-accent/30' },
+                { label: 'All-Time', stats: todayStats.all_time, accent: 'text-purple-400', border: 'border-purple-500/30' },
+              ].map(({ label, stats, accent, border }) => (
+                <div key={label} className={`bg-card border ${border} rounded-2xl p-5`}>
+                  <h3 className={`text-xs font-bold uppercase tracking-wider mb-4 ${accent}`}>{label}</h3>
+                  <div className="space-y-3">
+                    <div className="flex items-baseline justify-between">
+                      <span className="text-xs text-muted">Total P&L</span>
+                      <span className={`text-2xl font-bold font-mono ${stats.total_pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+                        {stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 pt-2 border-t border-border">
+                      <div>
+                        <p className="text-xs text-muted">Demo P&L</p>
+                        <p className={`text-sm font-mono font-semibold ${stats.demo_pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+                          {stats.demo_pnl >= 0 ? '+' : ''}${stats.demo_pnl.toFixed(2)}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted">Live P&L</p>
+                        <p className={`text-sm font-mono font-semibold ${stats.live_pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+                          {stats.live_pnl >= 0 ? '+' : ''}${stats.live_pnl.toFixed(2)}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 pt-2 border-t border-border text-center">
+                      <div>
+                        <p className="text-xs text-muted">Trades</p>
+                        <p className="text-sm font-mono font-semibold">{stats.trades}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted">Win Rate</p>
+                        <p className={`text-sm font-mono font-semibold ${stats.win_rate_pct >= 50 ? 'text-profit' : stats.win_rate_pct > 0 ? 'text-loss' : 'text-muted'}`}>
+                          {stats.trades > 0 ? `${stats.win_rate_pct}%` : '\u2014'}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted">Avg/Trade</p>
+                        <p className={`text-sm font-mono font-semibold ${stats.avg_pnl_per_trade >= 0 ? 'text-profit' : 'text-loss'}`}>
+                          {stats.trades > 0 ? `${stats.avg_pnl_per_trade >= 0 ? '+' : ''}$${stats.avg_pnl_per_trade.toFixed(2)}` : '\u2014'}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 pt-2 border-t border-border text-center">
+                      <div>
+                        <p className="text-xs text-muted">W / L</p>
+                        <p className="text-sm font-mono">
+                          <span className="text-profit">{stats.wins}</span>
+                          <span className="text-muted"> / </span>
+                          <span className="text-loss">{stats.losses}</span>
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted">Partial Locked</p>
+                        <p className="text-sm font-mono font-semibold text-warning">
+                          ${stats.partial_pnl_locked.toFixed(2)}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
