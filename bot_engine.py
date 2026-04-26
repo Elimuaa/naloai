@@ -150,12 +150,13 @@ class BotState:
 AUTO_OPTIMIZE_INTERVAL = 200
 
 # Dead zone hours (UTC) — data-driven from 14-month BTC audit (RC Quantum Signal Engine)
-# Losing hours identified: 1,6,9,11,13,14,17,18
-# Previously wrong {4,5,6,7} — was blocking profitable hours 4,5,7 and missing 9,11,13,14,17,18
-DEAD_ZONE_HOURS = {1, 6, 9, 11, 13, 14, 17, 18}
+# CONSERVATIVE blacklist: only the WORST 4 hours where edge is statistically negative.
+# Was {1,6,9,11,13,14,17,18} (8h) — too restrictive, was cutting volume in half vs RC Quantum.
+# Now {1,11,13,18} — kept the 4 hours with strongest negative edge; opens up 4 more trading hours/day.
+DEAD_ZONE_HOURS = {1, 11, 13, 18}
 
 # Minimum cooldown after stop loss (seconds)
-MIN_COOLDOWN_SECONDS = 900  # 15 minutes — faster re-entry after a loss
+MIN_COOLDOWN_SECONDS = 600  # 10 minutes — re-enter faster after a loss (was 15)
 
 bot_states: dict[str, BotState] = {}
 _bot_tasks: dict[str, asyncio.Task] = {}

@@ -109,6 +109,12 @@ async def calibrate_after_trade(user_id: str) -> dict | None:
         if not user or not user.is_premium:
             return None
 
+        # Get total closed trade count for over-fit guard
+        from sqlalchemy import func as _f
+        total_closed = (await db.execute(
+            select(_f.count(Trade.id)).where(Trade.user_id == user_id, Trade.state == "closed")
+        )).scalar() or 0
+
         # Get last 30 closed trades for analysis
         result = await db.execute(
             select(Trade)
@@ -118,8 +124,16 @@ async def calibrate_after_trade(user_id: str) -> dict | None:
         )
         trades = result.scalars().all()
 
-    if len(trades) < 5:
-        logger.info(f"Not enough trades for calibration ({len(trades)}/5 min)")
+    # Over-fit guard: need 20+ trades minimum (was 5 — caused calibrator to drift on tiny samples).
+    # Pro users with 14-16 trades were getting calibrated 18× and drifting AWAY from optimal.
+    if total_closed < 20:
+        logger.info(f"Calibration deferred for user {user_id}: {total_closed}/20 trades min")
+        return None
+
+    # Throttle: only recalibrate every 10 trades, not after every close.
+    # 14 trades × 18 calibrations was over-fitting; now max 1 per 10 trades.
+    if total_closed % 10 != 0:
+        logger.info(f"Calibration throttled: only fires every 10th trade ({total_closed} total)")
         return None
 
     # Build trade history for the prompt

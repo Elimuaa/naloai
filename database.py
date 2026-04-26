@@ -62,8 +62,8 @@ class User(Base):
 
     # Risk management settings
     max_drawdown_pct: Mapped[float] = mapped_column(Float, default=8.0)       # 8% daily drawdown limit
-    max_stops_before_pause: Mapped[int] = mapped_column(Integer, default=3)
-    cooldown_ticks: Mapped[int] = mapped_column(Integer, default=5)
+    max_stops_before_pause: Mapped[int] = mapped_column(Integer, default=4)  # 3->4: less aggressive pausing
+    cooldown_ticks: Mapped[int] = mapped_column(Integer, default=3)  # 5->3: re-enter faster after stops
     risk_per_trade_pct: Mapped[float] = mapped_column(Float, default=2.0)     # 2% risk → $200/trade at $10k
     max_exposure_pct: Mapped[float] = mapped_column(Float, default=40.0)      # 40% max → $4k position at $10k
 
@@ -225,6 +225,25 @@ async def init_db():
                 else:
                     import logging
                     logging.getLogger(__name__).warning(f"Migration warning: {stmt[:60]}... -> {e}")
+
+        # One-time backfill: align EXISTING users with profit-optimized defaults.
+        # Only updates users that still have the OLD default values (preserves customizations).
+        backfills = [
+            # entry_z: 1.5 (old) -> 1.3 (new) — looser entries, more trades
+            "UPDATE users SET entry_z = 1.3 WHERE entry_z = 1.5",
+            # use_ema_filter: True (old) -> False (new) — EMA filter rejects too many good signals
+            "UPDATE users SET use_ema_filter = 0 WHERE use_ema_filter = 1",
+            # cooldown_ticks: 5 (old) -> 3 (new) — re-enter faster after stops
+            "UPDATE users SET cooldown_ticks = 3 WHERE cooldown_ticks = 5",
+            # max_stops_before_pause: 3 (old) -> 4 (new) — don't pause as easily
+            "UPDATE users SET max_stops_before_pause = 4 WHERE max_stops_before_pause = 3",
+        ]
+        for stmt in backfills:
+            try:
+                await conn.execute(text(stmt))
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Backfill warning: {stmt[:60]}... -> {e}")
 
 
 async def get_db():
