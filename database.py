@@ -121,6 +121,10 @@ class Trade(Base):
     quantity_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=0)
     # JSON snapshot of indicators at entry time
     indicators_snapshot: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Partial profit booked during the trade (e.g. 50% close at 1R) — pnl is the TOTAL incl. partial
+    partial_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    # Original entry quantity before partial (used for accurate per-trade R/R analytics)
+    initial_quantity: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=0)
 
     # AI analysis fields (populated by post_trade_ai_learner.py after close)
     ai_grade: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -208,6 +212,9 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN tradovate_username TEXT DEFAULT NULL",
             "ALTER TABLE users ADD COLUMN tradovate_password TEXT DEFAULT NULL",
             "ALTER TABLE users ADD COLUMN tradovate_account_id INTEGER DEFAULT NULL",
+            # Partial profit accounting
+            "ALTER TABLE trades ADD COLUMN partial_pnl REAL DEFAULT 0.0",
+            "ALTER TABLE trades ADD COLUMN initial_quantity REAL DEFAULT 0",
         ]:
             try:
                 await conn.execute(text(stmt))

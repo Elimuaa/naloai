@@ -96,12 +96,23 @@ class RiskManager:
             cutoff = datetime.now(timezone.utc) - self.stop_guard_window
             self.stop_loss_times = [t for t in self.stop_loss_times if t > cutoff]
 
-    def record_trade_close(self, pnl: float, exit_reason: str):
-        """Record a closed trade for risk tracking."""
+    def record_trade_close(self, pnl: float, exit_reason: str, total_pnl: Optional[float] = None):
+        """Record a closed trade for risk tracking.
+
+        `pnl` is the close-leg P&L (added to daily_pnl). If a partial-profit
+        close fired earlier in the trade, that profit was already booked into
+        daily_pnl at the time of the partial — passing close-leg only here
+        avoids double-counting.
+
+        `total_pnl` (optional) is the TRUE total profit (close-leg + partial).
+        It's what the Kelly tracker uses to grade the trade as win/loss.
+        Defaults to `pnl` when no partial occurred.
+        """
         self.daily_pnl += pnl
 
-        # Track for Kelly sizing — keep rolling last 30 trades
-        self.recent_trades.append((pnl, pnl > 0))
+        # Track for Kelly sizing — use TOTAL trade outcome (partial + close)
+        kelly_pnl = total_pnl if total_pnl is not None else pnl
+        self.recent_trades.append((kelly_pnl, kelly_pnl > 0))
         if len(self.recent_trades) > 30:
             self.recent_trades.pop(0)
 

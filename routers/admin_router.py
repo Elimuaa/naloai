@@ -135,6 +135,88 @@ async def admin_summary(
     }
 
 
+@router.get("/today-stats")
+async def admin_today_stats(
+    admin: User = Depends(verify_admin_jwt),
+    db: AsyncSession = Depends(get_db)
+):
+    """Real-time platform performance: trades + P&L today, 7d, all-time."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_ago = now - timedelta(days=7)
+
+    async def stats_for(since: datetime | None):
+        """Aggregate trades closed since `since`. None = all time."""
+        q_count = select(func.count(Trade.id)).where(Trade.state == "closed")
+        q_pnl = select(func.sum(Trade.pnl)).where(Trade.state == "closed")
+        q_wins = select(func.count(Trade.id)).where(Trade.state == "closed", Trade.pnl > 0)
+        q_losses = select(func.count(Trade.id)).where(Trade.state == "closed", Trade.pnl <= 0)
+        q_partial = select(func.sum(Trade.partial_pnl)).where(Trade.state == "closed")
+        q_demo_pnl = select(func.sum(Trade.pnl)).where(
+            Trade.state == "closed", Trade.is_demo == True
+        )
+        q_live_pnl = select(func.sum(Trade.pnl)).where(
+            Trade.state == "closed", Trade.is_demo == False
+        )
+        if since is not None:
+            q_count = q_count.where(Trade.closed_at >= since)
+            q_pnl = q_pnl.where(Trade.closed_at >= since)
+            q_wins = q_wins.where(Trade.closed_at >= since)
+            q_losses = q_losses.where(Trade.closed_at >= since)
+            q_partial = q_partial.where(Trade.closed_at >= since)
+            q_demo_pnl = q_demo_pnl.where(Trade.closed_at >= since)
+            q_live_pnl = q_live_pnl.where(Trade.closed_at >= since)
+
+        cnt = (await db.execute(q_count)).scalar() or 0
+        pnl = (await db.execute(q_pnl)).scalar() or 0.0
+        wins = (await db.execute(q_wins)).scalar() or 0
+        losses = (await db.execute(q_losses)).scalar() or 0
+        partial = (await db.execute(q_partial)).scalar() or 0.0
+        demo_pnl = (await db.execute(q_demo_pnl)).scalar() or 0.0
+        live_pnl = (await db.execute(q_live_pnl)).scalar() or 0.0
+        return {
+            "trades": cnt,
+            "wins": wins,
+            "losses": losses,
+            "win_rate_pct": round((wins / cnt * 100) if cnt else 0, 1),
+            "total_pnl": round(pnl, 2),
+            "demo_pnl": round(demo_pnl, 2),
+            "live_pnl": round(live_pnl, 2),
+            "partial_pnl_locked": round(partial, 2),
+            "avg_pnl_per_trade": round(pnl / cnt, 2) if cnt else 0.0,
+        }
+
+    today = await stats_for(today_start)
+    week = await stats_for(week_ago)
+    all_time = await stats_for(None)
+
+    # Currently open positions across the platform
+    open_count = (await db.execute(
+        select(func.count(Trade.id)).where(Trade.state == "open")
+    )).scalar() or 0
+
+    # Active bots
+    active_bots = (await db.execute(
+        select(func.count(User.id)).where(User.bot_active == True)
+    )).scalar() or 0
+
+    # Trades opened today (entries — different from closes)
+    opened_today = (await db.execute(
+        select(func.count(Trade.id)).where(Trade.opened_at >= today_start)
+    )).scalar() or 0
+
+    return {
+        "as_of_utc": now.isoformat(),
+        "active_bots": active_bots,
+        "open_positions": open_count,
+        "trades_opened_today": opened_today,
+        "today": today,
+        "last_7_days": week,
+        "all_time": all_time,
+    }
+
+
 @router.post("/users/{user_id}/premium")
 async def admin_toggle_premium(
     user_id: str,

@@ -141,6 +141,7 @@ class BotState:
         # Partial profit taking
         self.partial_exit_done: bool = False        # True once 50% has been closed at 1R
         self.initial_quantity: float = 0.0          # full size at entry; remaining = current_quantity
+        self.partial_pnl_booked: float = 0.0        # P&L locked during the trade (added to total at close)
         # Adaptive R/R per trade
         self.adaptive_tp_pct: Optional[float] = None  # locked at entry based on regime
 
@@ -510,12 +511,18 @@ async def _save_trade(user_id: str, trade_data: dict) -> str:
 async def _close_trade(
     user_id: str, trade_id: str, exit_price: float, exit_reason: str,
     entry_price: float, side: str, entry_z: float, current_z: float,
-    symbol: str = "BTC-USD", quantity: float = 1.0
+    symbol: str = "BTC-USD", quantity: float = 1.0,
+    partial_pnl: float = 0.0,
 ):
+    """Close a trade in DB. `quantity` is the REMAINING qty after any partial.
+    `partial_pnl` is profit already booked during the trade (50% close at 1R).
+    Stored Trade.pnl is the TOTAL = close-leg pnl + partial_pnl.
+    """
     if not entry_price or entry_price <= 0:
         entry_price = exit_price  # Safeguard: avoids division by zero
     price_diff = (exit_price - entry_price) if side == "buy" else (entry_price - exit_price)
-    pnl = price_diff * quantity
+    close_leg_pnl = price_diff * quantity
+    pnl = close_leg_pnl + partial_pnl                      # ← TRUE total profit
     pnl_pct = (price_diff / entry_price) * 100 if entry_price > 0 else 0.0
     async with AsyncSessionLocal() as db:
         await db.execute(
@@ -523,6 +530,7 @@ async def _close_trade(
                 exit_price=str(exit_price),
                 pnl=pnl,
                 pnl_pct=pnl_pct,
+                partial_pnl=partial_pnl,                   # ← persist for analytics
                 state="closed",
                 exit_reason=exit_reason,
                 closed_at=datetime.now(timezone.utc)
@@ -791,6 +799,23 @@ async def _bot_loop(user_id: str):
             else:
                 adaptive_trail = trail_stop_pct
 
+            # ── PROGRESSIVE TRAIL TIGHTENING: lock in more of the winner as profit grows ──
+            # At 1.5R captured: trail tightens to 60% of base
+            # At 2.0R captured: trail tightens to 40% of base (very protective)
+            # Past partial-profit trades benefit most — they already locked 0.5R, this lets
+            # the runner ride further with tighter protection.
+            if state.in_trade and state.entry_price and state.entry_price > 0:
+                _r_distance = stop_loss_pct  # 1R in %
+                _profit_pct_now = (
+                    (current_price - state.entry_price) / state.entry_price if state.trade_side == "buy"
+                    else (state.entry_price - current_price) / state.entry_price
+                )
+                _r_multiple = _profit_pct_now / _r_distance if _r_distance > 0 else 0
+                if _r_multiple >= 2.0:
+                    adaptive_trail = max(adaptive_trail * 0.40, 0.003)   # min 0.3%
+                elif _r_multiple >= 1.5:
+                    adaptive_trail = max(adaptive_trail * 0.60, 0.005)   # min 0.5%
+
             if state.in_trade and state.entry_price:
                 if state.trade_side == "buy" and state.trail_stop_price:
                     state.trail_stop_price = max(
@@ -842,6 +867,7 @@ async def _bot_loop(user_id: str):
                             )
                             partial_pnl = partial_diff * half_qty
                             risk_mgr.daily_pnl += partial_pnl   # book the locked profit
+                            state.partial_pnl_booked = partial_pnl  # remember for final-close accounting
 
                             # Reduce remaining quantity
                             state.current_quantity = max(
@@ -851,6 +877,18 @@ async def _bot_loop(user_id: str):
                             if _pres["qty_precision"] == 0:
                                 state.current_quantity = int(state.current_quantity)
                             state.partial_exit_done = True
+
+                            # Persist partial_pnl on the Trade record (so analytics see total profit)
+                            try:
+                                async with AsyncSessionLocal() as db_p:
+                                    await db_p.execute(
+                                        update(Trade).where(Trade.id == state.current_trade_id).values(
+                                            partial_pnl=partial_pnl
+                                        )
+                                    )
+                                    await db_p.commit()
+                            except Exception as _pe:
+                                logger.warning(f"Persist partial_pnl failed for {user_id}: {_pe}")
 
                             # Persist demo balance after partial close
                             if is_demo and hasattr(client, 'balance'):
@@ -949,17 +987,21 @@ async def _bot_loop(user_id: str):
                         (current_price - state.entry_price) if state.trade_side == "buy"
                         else (state.entry_price - current_price)
                     )
-                    pnl = price_diff * state.current_quantity
+                    close_leg_pnl = price_diff * state.current_quantity
+                    # TOTAL trade P&L = profit booked during partial + close-leg P&L
+                    pnl = close_leg_pnl + state.partial_pnl_booked
                     pnl_pct = (price_diff / state.entry_price) * 100 if state.entry_price > 0 else 0.0
 
                     await _close_trade(
                         user_id, state.current_trade_id, current_price, exit_reason,
                         state.entry_price, state.trade_side, state.entry_z_score or 0, z_score,
-                        symbol=symbol, quantity=state.current_quantity
+                        symbol=symbol, quantity=state.current_quantity,
+                        partial_pnl=state.partial_pnl_booked,
                     )
 
-                    # Update risk manager
-                    risk_mgr.record_trade_close(pnl, exit_reason)
+                    # Update risk manager: daily_pnl gets close-leg only (partial already booked),
+                    # but Kelly tracker uses TOTAL to correctly grade the trade.
+                    risk_mgr.record_trade_close(close_leg_pnl, exit_reason, total_pnl=pnl)
 
                     # Track consecutive losses/wins and cooldown
                     if pnl < 0:
@@ -1037,6 +1079,7 @@ async def _bot_loop(user_id: str):
                     state.trade_open_time = None
                     state.partial_exit_done = False
                     state.initial_quantity = 0.0
+                    state.partial_pnl_booked = 0.0
                     state.adaptive_tp_pct = None
                     from broker_base import get_asset_class, ASSET_CLASS_PRESETS as _FQP
                     state.current_quantity = _FQP[get_asset_class(symbol)]["qty_step"]
@@ -1204,6 +1247,17 @@ async def _bot_loop(user_id: str):
                                         strength_mult *= _kelly_mult
                                         if _kelly_mult < 0.7 or _kelly_mult > 1.2:
                                             logger.info(f"Kelly adjustment: {_kelly_mult:.2f}× (edge signal)")
+                                        # ── REALIZED-VOL GUARD: cut size 50% during volatility spikes ──
+                                        # If recent realized vol > 2× the longer-window average, market is in
+                                        # an unstable regime → halve the position regardless of signal strength.
+                                        if len(state.price_history) >= 50:
+                                            _short = state.price_history[-10:]
+                                            _long = state.price_history[-50:]
+                                            _short_std = (sum((p - sum(_short)/10)**2 for p in _short) / 10) ** 0.5
+                                            _long_std = (sum((p - sum(_long)/50)**2 for p in _long) / 50) ** 0.5
+                                            if _long_std > 0 and _short_std / _long_std > 2.0:
+                                                strength_mult *= 0.50
+                                                logger.info(f"Vol-spike guard: short/long σ = {_short_std/_long_std:.2f} → halving size")
                                         quantity = round(base_qty * strength_mult, 8)
 
                                     # ── Asset-class quantity rounding ──
@@ -1257,6 +1311,7 @@ async def _bot_loop(user_id: str):
                                         "side": entry_side,
                                         "quantity": qty_str,
                                         "quantity_value": quantity,
+                                        "initial_quantity": quantity,   # full size at entry
                                         "entry_price": str(current_price),
                                         "state": "open",
                                         "is_demo": is_demo,
