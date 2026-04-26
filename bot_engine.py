@@ -941,17 +941,48 @@ async def _bot_loop(user_id: str):
                     else:
                         sl = min(sl, ep)
 
-                # ── TIME-IN-TRADE LIMIT: close after 4 hours to free up capital ──
+                # ── SMART EXIT: z-reversion (primary) + hard time cap (fallback) ──
+                # Mean-reversion thesis: entered at |z|>=1.3 expecting return to 0.
+                # Once |z|<0.3 with profit, signal is fulfilled — exit, redeploy capital.
+                # Hard cap at 5h = one full 20-bar lookback. Past that, edge is decayed
+                # below noise floor; we'd be praying not trading. SL/TP/trail handle
+                # everything in between (don't curve-fit asymmetric loser/winner timers
+                # for a strategy that already has SL/trail doing outcome management).
                 _time_limit_exit = False
-                if state.trade_open_time is not None:
+                _smart_exit_reason = None
+                if state.trade_open_time is not None and ep > 0:
                     _elapsed_hours = (time.time() - state.trade_open_time) / 3600
-                    if _elapsed_hours >= 4.0:
+
+                    # R-multiple (only used to gate z-reversion exit on profitable trades)
+                    sl_dist = ep * (user.stop_loss_pct or 0.025)
+                    if sl_dist > 0:
+                        if state.trade_side == "buy":
+                            r_now = (current_price - ep) / sl_dist
+                        else:
+                            r_now = (ep - current_price) / sl_dist
+                    else:
+                        r_now = 0.0
+
+                    # 1) Z-REVERSION — signal premise fulfilled, take the win
+                    if abs(z_score) < 0.3 and r_now > 0:
                         _time_limit_exit = True
-                        logger.info(f"Time-limit exit for {user_id}: trade open {_elapsed_hours:.1f}h")
+                        _smart_exit_reason = "z_reverted"
+                        logger.info(
+                            f"Z-reversion exit {user_id}: z={z_score:.2f}, r={r_now:.2f}, "
+                            f"elapsed={_elapsed_hours:.1f}h"
+                        )
+                    # 2) HARD TIME CAP — one full lookback window (5h on 15m bars)
+                    elif _elapsed_hours >= 5.0:
+                        _time_limit_exit = True
+                        _smart_exit_reason = "time_limit"
+                        logger.info(
+                            f"Time-cap exit {user_id}: elapsed={_elapsed_hours:.1f}h, r={r_now:.2f}"
+                        )
+                    # Otherwise: SL / TP / trail stop handle the trade.
 
                 exit_reason = None
                 if _time_limit_exit:
-                    exit_reason = "time_limit"
+                    exit_reason = _smart_exit_reason or "time_limit"
                 elif state.trade_side == "buy":
                     if current_price <= sl:
                         exit_reason = "stop_loss"
