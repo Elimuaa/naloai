@@ -11,6 +11,8 @@ interface UserRow {
   bot_active: boolean
   trading_symbol: string
   demo_balance: number
+  cash_balance: number
+  open_position_value: number
   total_trades: number
   open_trades: number
   wins: number
@@ -440,8 +442,13 @@ export function AdminDashboard() {
                     </td>
                     {/* Balance */}
                     <td className="py-3.5 text-right">
-                      <p className="font-mono text-warning">${u.demo_balance.toLocaleString()}</p>
-                      <p className="text-xs text-muted">{u.has_api_keys ? 'Live' : 'Demo'}</p>
+                      <p className="font-mono text-warning font-semibold">${u.demo_balance.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
+                      <p className="text-xs text-muted">{u.has_api_keys ? 'Live' : 'Demo'} equity</p>
+                      {u.open_position_value > 0 && (
+                        <p className="text-xs text-accent/70 font-mono mt-0.5">
+                          ${u.cash_balance.toFixed(0)} cash + ${u.open_position_value.toFixed(0)} in trade
+                        </p>
+                      )}
                     </td>
                     {/* Actions */}
                     <td className="py-3.5 text-center">

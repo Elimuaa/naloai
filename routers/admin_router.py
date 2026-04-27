@@ -4,7 +4,7 @@ import logging
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func, update, Float
 from database import get_db, User, Trade, AsyncSession
 from auth import get_current_user
 from datetime import datetime, timezone, timedelta
@@ -79,19 +79,24 @@ async def admin_users(
         wins = wins_result.scalar() or 0
 
         open_result = await db.execute(
-            select(func.count(Trade.id)).where(
-                Trade.user_id == u.id, Trade.state == "open"
-            )
+            select(
+                func.count(Trade.id).label("cnt"),
+                func.sum(Trade.quantity_value * func.cast(Trade.entry_price, Float)).label("position_value")
+            ).where(Trade.user_id == u.id, Trade.state == "open")
         )
-        open_trades = open_result.scalar() or 0
+        open_row = open_result.one()
+        open_trades = open_row.cnt or 0
+        open_position_value = round(open_row.position_value or 0.0, 2)
 
         # Period P&L breakdowns
-        daily_pnl  = await period_pnl(u.id, today_start)
-        weekly_pnl = await period_pnl(u.id, week_ago)
+        daily_pnl   = await period_pnl(u.id, today_start)
+        weekly_pnl  = await period_pnl(u.id, week_ago)
         monthly_pnl = await period_pnl(u.id, month_ago)
 
         has_keys = bool(u.rh_api_key)
-        demo_balance = u.demo_balance or 10000.0
+        cash_balance = round(u.demo_balance or 10000.0, 2)
+        # Total equity = cash on hand + value of open positions (at entry price)
+        demo_balance = round(cash_balance + open_position_value, 2)
 
         user_data.append({
             "id": u.id,
@@ -100,7 +105,9 @@ async def admin_users(
             "has_api_keys": has_keys,
             "bot_active": u.bot_active,
             "trading_symbol": u.trading_symbol,
-            "demo_balance": round(demo_balance, 2),
+            "demo_balance": demo_balance,
+            "cash_balance": cash_balance,
+            "open_position_value": open_position_value,
             "total_trades": total_trades,
             "open_trades": open_trades,
             "wins": wins,
