@@ -257,8 +257,8 @@ async def stop_bot(user_id: str):
                             update(User).where(User.id == user_id).values(demo_balance=round(client.balance, 2))
                         )
                         await db2.commit()
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning(f"stop_bot: failed to persist demo_balance for {user_id}: {_e}")
     if user_id in _bot_tasks:
         _bot_tasks[user_id].cancel()
         try:
@@ -664,8 +664,8 @@ async def _bot_loop(user_id: str):
                     fallback = await _fetch_price(symbol)
                     if fallback:
                         current_price = fallback
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning(f"Price fetch fallback failed for {user_id}/{symbol}: {_e}")
             if current_price <= 0:
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
@@ -684,8 +684,8 @@ async def _bot_loop(user_id: str):
                         state.eth_price_history.append(eth_price)
                         if len(state.eth_price_history) > 200:
                             state.eth_price_history = state.eth_price_history[-200:]
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug(f"ETH correlation fetch skipped for {user_id}: {_e}")
 
             # Auto-optimize: run quantum optimizer every N ticks (non-blocking)
             # Skip if AI calibration ran recently (within 50 ticks) to avoid param conflicts
@@ -1241,8 +1241,8 @@ async def _bot_loop(user_id: str):
                                             state.last_signal = f"Pattern memory: hour {current_hour} UTC historically loses"
                                             logger.info(f"Pattern memory blocked {entry_side} at hour {current_hour} for {user_id}")
                                             continue
-                                    except Exception:
-                                        pass
+                                    except Exception as _e:
+                                        logger.debug(f"Pattern memory skipped for {user_id}: {_e}")
 
                                 if not ai_approved:
                                     pass  # Skip entry — AI blocked it
