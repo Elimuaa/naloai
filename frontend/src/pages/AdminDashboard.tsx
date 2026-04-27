@@ -17,6 +17,9 @@ interface UserRow {
   losses: number
   win_rate: number
   total_pnl: number
+  daily_pnl: number
+  weekly_pnl: number
+  monthly_pnl: number
   is_premium: boolean
   premium_since: string | null
   calibration_count: number
@@ -42,6 +45,7 @@ interface PeriodStats {
   live_pnl: number
   partial_pnl_locked: number
   avg_pnl_per_trade: number
+  btc_hodl_pct: number
 }
 
 interface TodayStats {
@@ -266,6 +270,48 @@ export function AdminDashboard() {
                         </p>
                       </div>
                     </div>
+
+                    {/* BTC HODL Benchmark */}
+                    {stats.btc_hodl_pct !== undefined && (
+                      <div className="pt-2 border-t border-border mt-1">
+                        <p className="text-xs text-muted mb-1.5 font-semibold uppercase tracking-wider">vs BTC Hold</p>
+                        <div className="flex items-center justify-between">
+                          <div className="text-center flex-1">
+                            <p className="text-xs text-muted">Bot P&L</p>
+                            <p className={`text-sm font-mono font-bold ${stats.total_pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+                              {stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(2)}
+                            </p>
+                          </div>
+                          <div className="text-center px-2">
+                            {stats.total_pnl >= stats.btc_hodl_pct * 100 ? (
+                              <span className="text-lg">🏆</span>
+                            ) : (
+                              <span className="text-lg">📉</span>
+                            )}
+                          </div>
+                          <div className="text-center flex-1">
+                            <p className="text-xs text-muted">BTC HODL</p>
+                            <p className={`text-sm font-mono font-bold ${stats.btc_hodl_pct >= 0 ? 'text-profit' : 'text-loss'}`}>
+                              {stats.btc_hodl_pct >= 0 ? '+' : ''}{stats.btc_hodl_pct.toFixed(2)}%
+                            </p>
+                          </div>
+                        </div>
+                        <div className={`mt-2 text-center text-xs font-semibold py-1 rounded-lg ${
+                          stats.total_pnl > 0 && stats.btc_hodl_pct <= 0
+                            ? 'bg-profit/15 text-profit'
+                            : stats.total_pnl > stats.btc_hodl_pct * 100
+                            ? 'bg-profit/10 text-profit'
+                            : 'bg-loss/10 text-loss'
+                        }`}>
+                          {stats.total_pnl > 0 && stats.btc_hodl_pct <= 0
+                            ? '✓ Bot wins — HODL lost money'
+                            : stats.total_pnl > 0
+                            ? `Bot active vs HODL ${stats.btc_hodl_pct >= 0 ? '+' : ''}${stats.btc_hodl_pct.toFixed(2)}%`
+                            : `HODL outperforming by ${(stats.btc_hodl_pct - (stats.total_pnl / 100)).toFixed(2)}%`
+                          }
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
@@ -302,7 +348,10 @@ export function AdminDashboard() {
                   <th className="pb-3 text-center font-medium">Plan</th>
                   <th className="pb-3 text-right font-medium">Trades</th>
                   <th className="pb-3 text-right font-medium">Win Rate</th>
-                  <th className="pb-3 text-right font-medium">P&L</th>
+                  <th className="pb-3 text-right font-medium">Today P&L</th>
+                  <th className="pb-3 text-right font-medium">7d P&L</th>
+                  <th className="pb-3 text-right font-medium">30d P&L</th>
+                  <th className="pb-3 text-right font-medium">All-Time P&L</th>
                   <th className="pb-3 text-right font-medium">Balance</th>
                   <th className="pb-3 text-center font-medium">Actions</th>
                 </tr>
@@ -365,7 +414,25 @@ export function AdminDashboard() {
                         {u.total_trades > 0 ? `${u.win_rate}%` : '\u2014'}
                       </p>
                     </td>
-                    {/* P&L */}
+                    {/* Today P&L */}
+                    <td className="py-3.5 text-right">
+                      <p className={`font-mono font-semibold text-sm ${u.daily_pnl > 0 ? 'text-profit' : u.daily_pnl < 0 ? 'text-loss' : 'text-muted'}`}>
+                        {u.daily_pnl !== 0 ? `${u.daily_pnl >= 0 ? '+' : ''}$${u.daily_pnl.toFixed(2)}` : '—'}
+                      </p>
+                    </td>
+                    {/* 7d P&L */}
+                    <td className="py-3.5 text-right">
+                      <p className={`font-mono font-semibold text-sm ${u.weekly_pnl > 0 ? 'text-profit' : u.weekly_pnl < 0 ? 'text-loss' : 'text-muted'}`}>
+                        {u.weekly_pnl !== 0 ? `${u.weekly_pnl >= 0 ? '+' : ''}$${u.weekly_pnl.toFixed(2)}` : '—'}
+                      </p>
+                    </td>
+                    {/* 30d P&L */}
+                    <td className="py-3.5 text-right">
+                      <p className={`font-mono font-semibold text-sm ${u.monthly_pnl > 0 ? 'text-profit' : u.monthly_pnl < 0 ? 'text-loss' : 'text-muted'}`}>
+                        {u.monthly_pnl !== 0 ? `${u.monthly_pnl >= 0 ? '+' : ''}$${u.monthly_pnl.toFixed(2)}` : '—'}
+                      </p>
+                    </td>
+                    {/* All-Time P&L */}
                     <td className="py-3.5 text-right">
                       <p className={`font-mono font-semibold ${u.total_pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
                         {u.total_trades > 0 ? `${u.total_pnl >= 0 ? '+' : ''}$${u.total_pnl.toFixed(2)}` : '\u2014'}

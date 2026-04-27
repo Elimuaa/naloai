@@ -1,12 +1,13 @@
 import os
 import secrets
 import logging
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy import select, func, update
 from database import get_db, User, Trade, AsyncSession
 from auth import get_current_user
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +40,27 @@ async def admin_users(
     admin: User = Depends(verify_admin_jwt),
     db: AsyncSession = Depends(get_db)
 ):
-    """Admin overview: all users with signup date, balance, and P&L."""
+    """Admin overview: all users with signup date, balance, P&L, and period breakdowns."""
+    now = datetime.now(timezone.utc)
+    today_start  = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_ago     = now - timedelta(days=7)
+    month_ago    = now - timedelta(days=30)
+
     result = await db.execute(select(User).order_by(User.created_at.desc()))
     users = result.scalars().all()
 
+    async def period_pnl(user_id: str, since: datetime | None) -> float:
+        q = select(func.sum(Trade.pnl)).where(
+            Trade.user_id == user_id, Trade.state == "closed"
+        )
+        if since:
+            q = q.where(Trade.closed_at >= since)
+        val = (await db.execute(q)).scalar()
+        return round(val or 0.0, 2)
+
     user_data = []
     for u in users:
-        # Get closed trades for P&L
+        # All-time aggregates
         trades_result = await db.execute(
             select(
                 func.count(Trade.id).label("total_trades"),
@@ -56,7 +71,6 @@ async def admin_users(
         total_trades = row.total_trades or 0
         total_pnl = round(row.total_pnl if row.total_pnl is not None else 0, 4)
 
-        # Win count
         wins_result = await db.execute(
             select(func.count(Trade.id)).where(
                 Trade.user_id == u.id, Trade.state == "closed", Trade.pnl > 0
@@ -64,7 +78,6 @@ async def admin_users(
         )
         wins = wins_result.scalar() or 0
 
-        # Open trades count
         open_result = await db.execute(
             select(func.count(Trade.id)).where(
                 Trade.user_id == u.id, Trade.state == "open"
@@ -72,7 +85,11 @@ async def admin_users(
         )
         open_trades = open_result.scalar() or 0
 
-        # Live balance from Robinhood (if keys exist) — skip actual API call, show demo balance
+        # Period P&L breakdowns
+        daily_pnl  = await period_pnl(u.id, today_start)
+        weekly_pnl = await period_pnl(u.id, week_ago)
+        monthly_pnl = await period_pnl(u.id, month_ago)
+
         has_keys = bool(u.rh_api_key)
         demo_balance = u.demo_balance or 10000.0
 
@@ -90,6 +107,9 @@ async def admin_users(
             "losses": total_trades - wins,
             "win_rate": round(wins / total_trades * 100, 1) if total_trades > 0 else 0,
             "total_pnl": total_pnl,
+            "daily_pnl": daily_pnl,
+            "weekly_pnl": weekly_pnl,
+            "monthly_pnl": monthly_pnl,
             "is_premium": getattr(u, 'is_premium', False),
             "premium_since": u.premium_since.isoformat() if getattr(u, 'premium_since', None) else None,
             "calibration_count": getattr(u, 'calibration_count', 0),
@@ -135,13 +155,51 @@ async def admin_summary(
     }
 
 
+async def _btc_hodl_return(since_ts: float, symbol: str = "BTC-USD") -> float:
+    """
+    Fetch BTC return (%) from `since_ts` (unix) to now using Coinbase candles.
+    Uses 1h granularity — good enough for daily/weekly comparison.
+    Returns 0.0 on any error so the dashboard never breaks.
+    """
+    try:
+        now_ts = int(__import__('time').time())
+        gran = 3600  # 1h candles
+        url = f"https://api.exchange.coinbase.com/products/{symbol}/candles"
+        params = {
+            "start": datetime.fromtimestamp(since_ts, timezone.utc).isoformat(),
+            "end":   datetime.fromtimestamp(min(since_ts + gran * 2, now_ts), timezone.utc).isoformat(),
+            "granularity": gran,
+        }
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(url, params=params)
+        candles = r.json() if r.status_code == 200 else []
+        if not candles:
+            return 0.0
+        open_price = float(candles[-1][3])  # oldest candle open
+
+        # Current price — latest 1h candle
+        params2 = {
+            "start": datetime.fromtimestamp(now_ts - gran * 2, timezone.utc).isoformat(),
+            "end":   datetime.fromtimestamp(now_ts, timezone.utc).isoformat(),
+            "granularity": gran,
+        }
+        async with httpx.AsyncClient(timeout=5) as c:
+            r2 = await c.get(url, params=params2)
+        candles2 = r2.json() if r2.status_code == 200 else []
+        if not candles2 or open_price == 0:
+            return 0.0
+        current_price = float(candles2[0][4])  # newest candle close
+        return round((current_price - open_price) / open_price * 100, 2)
+    except Exception:
+        return 0.0
+
+
 @router.get("/today-stats")
 async def admin_today_stats(
     admin: User = Depends(verify_admin_jwt),
     db: AsyncSession = Depends(get_db)
 ):
-    """Real-time platform performance: trades + P&L today, 7d, all-time."""
-    from datetime import datetime, timedelta, timezone
+    """Real-time platform performance: trades + P&L today, 7d, all-time + BTC HODL benchmark."""
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_ago = now - timedelta(days=7)
@@ -191,6 +249,25 @@ async def admin_today_stats(
     week = await stats_for(week_ago)
     all_time = await stats_for(None)
 
+    # ── BTC HODL benchmark for each period ──
+    # Fetch in parallel — don't block if Coinbase is slow
+    import asyncio as _asyncio
+    # Find oldest trade for all-time HODL start
+    oldest_trade = (await db.execute(
+        select(Trade.opened_at).where(Trade.state == "closed").order_by(Trade.opened_at.asc()).limit(1)
+    )).scalar()
+    alltime_since = oldest_trade.timestamp() if oldest_trade else (now - timedelta(days=365)).timestamp()
+
+    hodl_today, hodl_week, hodl_alltime = await _asyncio.gather(
+        _btc_hodl_return(today_start.timestamp()),
+        _btc_hodl_return(week_ago.timestamp()),
+        _btc_hodl_return(alltime_since),
+        return_exceptions=True,
+    )
+    hodl_today   = hodl_today   if isinstance(hodl_today,   float) else 0.0
+    hodl_week    = hodl_week    if isinstance(hodl_week,    float) else 0.0
+    hodl_alltime = hodl_alltime if isinstance(hodl_alltime, float) else 0.0
+
     # Currently open positions across the platform
     open_count = (await db.execute(
         select(func.count(Trade.id)).where(Trade.state == "open")
@@ -211,9 +288,9 @@ async def admin_today_stats(
         "active_bots": active_bots,
         "open_positions": open_count,
         "trades_opened_today": opened_today,
-        "today": today,
-        "last_7_days": week,
-        "all_time": all_time,
+        "today": {**today, "btc_hodl_pct": hodl_today},
+        "last_7_days": {**week, "btc_hodl_pct": hodl_week},
+        "all_time": {**all_time, "btc_hodl_pct": hodl_alltime},
     }
 
 
