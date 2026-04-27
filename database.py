@@ -47,7 +47,7 @@ class User(Base):
     # Research-backed defaults: 2.5% SL / 5% TP = 2:1 R/R; 1.5% trail avoids micro-volatility exits
     stop_loss_pct: Mapped[float] = mapped_column(Float, default=0.025)
     take_profit_pct: Mapped[float] = mapped_column(Float, default=0.05)
-    trail_stop_pct: Mapped[float] = mapped_column(Float, default=0.015)
+    trail_stop_pct: Mapped[float] = mapped_column(Float, default=0.020)
 
     # Demo balance — user-configurable starting balance for paper trading
     demo_balance: Mapped[float] = mapped_column(Float, default=10000.0)
@@ -237,6 +237,8 @@ async def init_db():
             "UPDATE users SET cooldown_ticks = 3 WHERE cooldown_ticks = 5",
             # max_stops_before_pause: 3 (old) -> 4 (new) — don't pause as easily
             "UPDATE users SET max_stops_before_pause = 4 WHERE max_stops_before_pause = 3",
+            # trail_stop_pct: 0.015 (old) -> 0.020 (new) — stop clipping winners on BTC noise
+            "UPDATE users SET trail_stop_pct = 0.020 WHERE trail_stop_pct = 0.015",
         ]
         for stmt in backfills:
             try:

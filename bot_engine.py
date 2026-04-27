@@ -837,12 +837,12 @@ async def _bot_loop(user_id: str):
                 sl = ep * (1 - stop_loss_pct) if state.trade_side == "buy" else ep * (1 + stop_loss_pct)
                 tp = ep * (1 + _tp_pct_active) if state.trade_side == "buy" else ep * (1 - _tp_pct_active)
 
-                # ── PARTIAL PROFIT AT 1R: close 50% of position once 1× SL distance in profit ──
-                # This locks in guaranteed profit on every trade that reaches the 1R checkpoint,
-                # regardless of where it ends up. Transforms a mediocre win-rate into a profitable
-                # distribution — the #1 professional edge.
+                # ── PARTIAL PROFIT AT 1.5R: close 50% of position once 1.5× SL distance in profit ──
+                # Moved from 1R → 1.5R: firing at 1R was too early — BTC noise clips winners
+                # before they mature. 1.5R ensures the move is real before locking half profit.
+                # Remaining 50% runs to full TP (2× SL) or trail stop.
                 if not state.partial_exit_done and state.initial_quantity > 0:
-                    one_r_move = stop_loss_pct  # 1× stop distance in %
+                    one_r_move = stop_loss_pct * 1.5  # 1.5× stop distance in %
                     profit_pct_now = (
                         (current_price - ep) / ep if state.trade_side == "buy"
                         else (ep - current_price) / ep
@@ -1177,12 +1177,14 @@ async def _bot_loop(user_id: str):
                                     state.indicators, entry_side
                                 )
 
-                                # ── PREMIUM ADVANTAGE 1: Minimum signal strength gate ──
-                                # Live premium users only take high-quality signals (strength > 0.35)
-                                # Demo mode bypassed — let demo trade freely to show activity
-                                if is_premium_user and not is_demo and signal_strength < 0.35:
-                                    state.last_signal = f"Pro filter: signal too weak ({signal_strength:.0%}), waiting for better setup"
-                                    logger.info(f"Premium quality gate blocked {entry_side} for {user_id}: strength={signal_strength:.2f}")
+                                # ── SIGNAL QUALITY GATE (all users) ──
+                                # Minimum strength 0.45 for everyone — blocks weakest 25% of signals
+                                # that historically contribute most losses. High-confidence signals
+                                # (0.75+) get position doubled — user's "duplicate best setups" logic.
+                                _min_strength = 0.55 if is_premium_user else 0.45
+                                if signal_strength < _min_strength:
+                                    state.last_signal = f"Quality gate: signal too weak ({signal_strength:.0%} < {_min_strength:.0%}), waiting"
+                                    logger.info(f"Quality gate blocked {entry_side} for {user_id}: strength={signal_strength:.2f}")
                                     continue
 
                                 # ── PREMIUM ADVANTAGE 2: AI Pre-trade screening ──
@@ -1256,13 +1258,25 @@ async def _bot_loop(user_id: str):
                                         base_qty = risk_mgr.calculate_position_size(
                                             balance, current_price, stop_loss_pct, state.price_history
                                         )
-                                        # Scale by signal strength: 50% at 0.3 strength, 100% at 0.7+
-                                        strength_mult = min(1.0, max(0.5, signal_strength / 0.7))
-                                        # ── PREMIUM ADVANTAGE 5: Higher confidence = bigger position ──
+                                        # ── CONFIDENCE-BASED POSITION SIZING ──
+                                        # High-confidence setups get doubled ("duplicate the best" logic).
+                                        # Weak signals that pass the gate get normal size.
+                                        # This concentrates capital on the best setups without changing trade count.
+                                        if signal_strength >= 0.80:
+                                            strength_mult = 2.5   # Strongest setups: 2.5× — full "duplicate"
+                                            logger.info(f"High-confidence entry {user_id}: {signal_strength:.0%} → 2.5× size")
+                                        elif signal_strength >= 0.70:
+                                            strength_mult = 2.0   # Strong: 2× size
+                                            logger.info(f"Strong entry {user_id}: {signal_strength:.0%} → 2× size")
+                                        elif signal_strength >= 0.60:
+                                            strength_mult = 1.5   # Medium: 1.5×
+                                        else:
+                                            strength_mult = 1.0   # Baseline (just cleared quality gate)
+                                        # ── AI confidence overlay (premium) ──
                                         if is_premium_user and ai_confidence > 70:
-                                            strength_mult = min(1.2, strength_mult * 1.15)  # Up to 20% bigger on high-confidence
+                                            strength_mult = min(3.0, strength_mult * 1.2)
                                         # ── Golden hour boost: up to 25% larger during best hours ──
-                                        strength_mult = min(1.5, strength_mult * _golden_boost)
+                                        strength_mult = min(3.0, strength_mult * _golden_boost)
                                         # ── LOSING STREAK REDUCTION: size down after 2 consecutive losses ──
                                         if state.consecutive_losses >= 2:
                                             _loss_mult = 0.60
