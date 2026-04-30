@@ -1080,11 +1080,13 @@ async def _bot_loop(user_id: str, symbol: str):
                         r_now = 0.0
 
                     # 1) Z-REVERSION — signal premise fulfilled, take the win
-                    # Require r_now >= 0.30 (captured ≥30% of 1R) before exiting on z-reversion.
-                    # This prevents $0.02 "wins" where z briefly dips below 0.3 before the
-                    # position has built any meaningful profit. Below 0.30R the trade is still
-                    # immature — let SL/TP/trail manage it instead.
-                    if abs(z_score) < 0.3 and r_now >= 0.30:
+                    # DEMO MODE: skip z-revert entirely. Let TP/SL/trail handle all exits.
+                    # Z-revert was producing $0.02–$0.50 wins that couldn't offset real losses.
+                    # Demo capital is virtual — no cost to holding. TP at 5% or trail stop are
+                    # the correct exits. Z-revert is only useful in live mode to free real capital.
+                    # LIVE MODE: require r_now >= 0.50 (captured ≥50% of 1R) — meaningful profit
+                    # locked before we exit on signal completion.
+                    if not is_demo and abs(z_score) < 0.3 and r_now >= 0.50:
                         _time_limit_exit = True
                         _smart_exit_reason = "z_reverted"
                         logger.info(
@@ -1276,10 +1278,10 @@ async def _bot_loop(user_id: str, symbol: str):
                 exit_reason2 = None
                 _elapsed2 = (time.time() - s2["trade_open_time"]) / 3600
                 _profit_pct2 = (current_price - ep2) / ep2 if side2 == "buy" else (ep2 - current_price) / ep2
-                # Same minimum-R gate as primary slot: require ≥30% of 1R captured before z-revert exit
+                # Second slot: same rule — no z-revert in demo, require 0.50R in live
                 _sl_dist2 = ep2 * (user.stop_loss_pct if user.stop_loss_pct is not None else 0.015)
                 _r_now2 = (_profit_pct2 * ep2) / _sl_dist2 if _sl_dist2 > 0 else 0.0
-                if abs(z_score) < 0.3 and _r_now2 >= 0.30:
+                if not is_demo and abs(z_score) < 0.3 and _r_now2 >= 0.50:
                     exit_reason2 = "z_reverted"
                 elif _elapsed2 >= 5.0:
                     exit_reason2 = "time_limit"
