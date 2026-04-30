@@ -32,30 +32,38 @@ async def lifespan(app: FastAPI):
     # Runs on every deploy. Upgrades any user still on old conservative values.
     # Target: $200-300/day on a $10k account via 40% max exposure + 2% risk/trade.
     from sqlalchemy import update as _up
+    # ── SCALP MODE: $5–20 z-revert wins + occasional TP at 2% ──────────────────
+    # Math: 0.5% SL, 2% TP = 4:1 R/R on TP hits.
+    # Z-revert fires when unrealised PnL >= $15 → avg $15-35 win.
+    # With 60% exposure on $10k = $6k deployed → 0.079 BTC position:
+    #   SL loss  = 0.079 × $76k × 0.005 = $30
+    #   TP win   = 0.079 × $76k × 0.020 = $120
+    #   Z-revert = $15–40 (fires after meaningful move, not $0.24 noise)
+    # Target: 15 z-revert wins × $20 + 2 TP hits × $120 − 4 SL × $30 = $420/day
     PROFIT_PARAMS = dict(
-        entry_z=1.3,
-        stop_loss_pct=0.015,        # 1.5% SL → 3.3:1 R/R with 5% TP (was 0.025 = 2:1)
-        take_profit_pct=0.05,
-        trail_stop_pct=0.020,       # 2.0% trail — wide enough to not clip BTC noise (was 0.015)
+        entry_z=1.1,                # lower threshold → more entries (was 1.3)
+        stop_loss_pct=0.005,        # 0.5% SL — tight enough to protect, wide enough for BTC noise
+        take_profit_pct=0.020,      # 2.0% TP — reachable intraday (was 5% — rarely hit)
+        trail_stop_pct=0.005,       # 0.5% trail — locks in wins as price moves (was 2%)
         use_rsi_filter=True,
         use_ema_filter=False,
         use_adx_filter=True,
         use_bbands_filter=True,
         use_macd_filter=False,
         max_drawdown_pct=8.0,
-        max_stops_before_pause=4,   # pause after 4 stops, not 3 (was 3 — too aggressive)
-        cooldown_ticks=3,           # re-enter faster after stops (was 5)
-        risk_per_trade_pct=2.0,
-        max_exposure_pct=40.0,
+        max_stops_before_pause=5,   # allow 5 stops before pause (more room at tighter SL)
+        cooldown_ticks=2,           # re-enter fast — scalp needs quick reloading
+        risk_per_trade_pct=2.5,     # 2.5% risk per trade (was 2%)
+        max_exposure_pct=60.0,      # 60% max exposure → bigger positions (was 40%)
         position_size_mode="dynamic",
     )
     async with AsyncSessionLocal() as db:
         await db.execute(_up(User).values(**PROFIT_PARAMS))
         await db.commit()
     logger.info(
-        "Startup: profit-optimised settings applied to ALL users — "
-        "SL=1.5%, TP=5% (3.3:1 R/R), trail=2%, risk=2%, exposure=40%, "
-        "entry_z=1.3, 4 symbols per user (BTC/ETH/SOL/DOGE)"
+        "Startup: SCALP MODE applied to ALL users — "
+        "SL=0.5%, TP=2% (4:1 R/R), trail=0.5%, z-revert min=$15, "
+        "entry_z=1.1, risk=2.5%, exposure=60%, target=$200+/day"
     )
 
     # Restore previously active bots

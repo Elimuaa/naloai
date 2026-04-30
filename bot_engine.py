@@ -1080,19 +1080,32 @@ async def _bot_loop(user_id: str, symbol: str):
                         r_now = 0.0
 
                     # 1) Z-REVERSION — signal premise fulfilled, take the win
-                    # DEMO MODE: skip z-revert entirely. Let TP/SL/trail handle all exits.
-                    # Z-revert was producing $0.02–$0.50 wins that couldn't offset real losses.
-                    # Demo capital is virtual — no cost to holding. TP at 5% or trail stop are
-                    # the correct exits. Z-revert is only useful in live mode to free real capital.
-                    # LIVE MODE: require r_now >= 0.50 (captured ≥50% of 1R) — meaningful profit
-                    # locked before we exit on signal completion.
-                    if not is_demo and abs(z_score) < 0.3 and r_now >= 0.50:
-                        _time_limit_exit = True
-                        _smart_exit_reason = "z_reverted"
-                        logger.info(
-                            f"Z-reversion exit {user_id}: z={z_score:.2f}, r={r_now:.2f}, "
-                            f"elapsed={_elapsed_hours:.1f}h"
-                        )
+                    # Minimum dollar P&L gate — prevents the $0.05/$0.24 exits that plagued
+                    # the old strategy. Fires only when the position has built real profit.
+                    # DEMO: $15 minimum unrealised PnL before z-revert can close the trade.
+                    #        At 0.5% SL and 0.079 BTC, $15 = ~0.25% price move — realistic.
+                    # LIVE: R-multiple gate (0.50R = half of 1R captured).
+                    _MIN_ZREVERT_PNL = 15.0   # $15 minimum profit to z-revert in demo
+                    _unrealised_pnl = (
+                        (current_price - ep) * state.current_quantity
+                        if state.trade_side == "buy"
+                        else (ep - current_price) * state.current_quantity
+                    )
+                    if abs(z_score) < 0.3:
+                        if is_demo and _unrealised_pnl >= _MIN_ZREVERT_PNL:
+                            _time_limit_exit = True
+                            _smart_exit_reason = "z_reverted"
+                            logger.info(
+                                f"Z-reversion exit (demo) {user_id}: z={z_score:.2f}, "
+                                f"pnl=${_unrealised_pnl:.2f}, elapsed={_elapsed_hours:.1f}h"
+                            )
+                        elif not is_demo and r_now >= 0.50:
+                            _time_limit_exit = True
+                            _smart_exit_reason = "z_reverted"
+                            logger.info(
+                                f"Z-reversion exit (live) {user_id}: z={z_score:.2f}, "
+                                f"r={r_now:.2f}, elapsed={_elapsed_hours:.1f}h"
+                            )
                     # 2) HARD TIME CAP — one full lookback window (5h on 15m bars)
                     elif _elapsed_hours >= 5.0:
                         _time_limit_exit = True
@@ -1278,11 +1291,15 @@ async def _bot_loop(user_id: str, symbol: str):
                 exit_reason2 = None
                 _elapsed2 = (time.time() - s2["trade_open_time"]) / 3600
                 _profit_pct2 = (current_price - ep2) / ep2 if side2 == "buy" else (ep2 - current_price) / ep2
-                # Second slot: same rule — no z-revert in demo, require 0.50R in live
-                _sl_dist2 = ep2 * (user.stop_loss_pct if user.stop_loss_pct is not None else 0.015)
+                # Second slot z-revert: same dollar gate as primary slot
+                _sl_dist2 = ep2 * (user.stop_loss_pct if user.stop_loss_pct is not None else 0.005)
                 _r_now2 = (_profit_pct2 * ep2) / _sl_dist2 if _sl_dist2 > 0 else 0.0
-                if not is_demo and abs(z_score) < 0.3 and _r_now2 >= 0.50:
-                    exit_reason2 = "z_reverted"
+                _unrealised_pnl2 = _profit_pct2 * ep2 * qty2
+                if abs(z_score) < 0.3:
+                    if is_demo and _unrealised_pnl2 >= 15.0:
+                        exit_reason2 = "z_reverted"
+                    elif not is_demo and _r_now2 >= 0.50:
+                        exit_reason2 = "z_reverted"
                 elif _elapsed2 >= 5.0:
                     exit_reason2 = "time_limit"
                 elif side2 == "buy":
