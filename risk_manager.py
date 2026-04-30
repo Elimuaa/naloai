@@ -78,8 +78,8 @@ class RiskManager:
         # Express as multiplier vs base risk_per_trade_pct (e.g. 2%)
         # half_kelly of 0.02 = 2% risk = 1.0× base
         base = self.risk_per_trade_pct / 100.0
-        if base <= 0:
-            return 1.0
+        if base <= 0 or half_kelly <= 0:
+            return 1.0  # no edge data yet — trade at baseline
         multiplier = half_kelly / base
         return max(0.25, min(1.5, multiplier))
 

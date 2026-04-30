@@ -34,17 +34,17 @@ async def lifespan(app: FastAPI):
     from sqlalchemy import update as _up
     PROFIT_PARAMS = dict(
         entry_z=1.3,
-        stop_loss_pct=0.025,
+        stop_loss_pct=0.015,        # 1.5% SL → 3.3:1 R/R with 5% TP (was 0.025 = 2:1)
         take_profit_pct=0.05,
-        trail_stop_pct=0.015,
+        trail_stop_pct=0.020,       # 2.0% trail — wide enough to not clip BTC noise (was 0.015)
         use_rsi_filter=True,
         use_ema_filter=False,
         use_adx_filter=True,
         use_bbands_filter=True,
         use_macd_filter=False,
         max_drawdown_pct=8.0,
-        max_stops_before_pause=3,
-        cooldown_ticks=5,
+        max_stops_before_pause=4,   # pause after 4 stops, not 3 (was 3 — too aggressive)
+        cooldown_ticks=3,           # re-enter faster after stops (was 5)
         risk_per_trade_pct=2.0,
         max_exposure_pct=40.0,
         position_size_mode="dynamic",
@@ -53,9 +53,9 @@ async def lifespan(app: FastAPI):
         await db.execute(_up(User).values(**PROFIT_PARAMS))
         await db.commit()
     logger.info(
-        "Startup: profit-optimised settings applied — "
-        "risk=2%, exposure=40%, entry_z=1.3, dead_zone={1,6,9,11,13,14,17,18}, "
-        "golden_hours={7,8,15,19,20}"
+        "Startup: profit-optimised settings applied to ALL users — "
+        "SL=1.5%, TP=5% (3.3:1 R/R), trail=2%, risk=2%, exposure=40%, "
+        "entry_z=1.3, 4 symbols per user (BTC/ETH/SOL/DOGE)"
     )
 
     # Restore previously active bots

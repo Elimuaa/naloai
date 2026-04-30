@@ -81,6 +81,7 @@ class MockRobinhoodClient:
         self.symbol = symbol
         self.balance = balance
         self._holdings: dict[str, float] = {}  # symbol -> quantity
+        self._lock = asyncio.Lock()  # prevents concurrent balance mutations across 4 symbol loops
         logger.info(f"MockRobinhoodClient initialized — demo balance: ${balance:,.2f} (using real market prices)")
 
     async def get_account(self) -> dict:
@@ -131,24 +132,27 @@ class MockRobinhoodClient:
         else:
             fill_price = mid_price * (1 - slip_frac)  # receive lower
 
-        if side == "buy":
-            notional = fill_price * qty
-            fee = notional * FEE_PCT
-            cost = notional + fee
-            if cost > self.balance:
-                logger.warning(f"Insufficient demo balance: need ${cost:,.2f}, have ${self.balance:,.2f}")
-                return {"id": order_id, "state": "rejected", "reason": "insufficient_balance"}
-            self.balance -= cost
-            self._holdings[symbol] = self._holdings.get(symbol, 0) + qty
-        else:
-            held = self._holdings.get(symbol, 0)
-            if qty > held:
-                qty = held  # Can only sell what we hold
-            notional = fill_price * qty
-            fee = notional * FEE_PCT
-            proceeds = notional - fee
-            self.balance += proceeds
-            self._holdings[symbol] = max(0, held - qty)
+        # Lock prevents two concurrent loops (e.g. BTC + ETH) both passing the balance
+        # check before either deducts, which could overdraw the account silently.
+        async with self._lock:
+            if side == "buy":
+                notional = fill_price * qty
+                fee = notional * FEE_PCT
+                cost = notional + fee
+                if cost > self.balance:
+                    logger.warning(f"Insufficient demo balance: need ${cost:,.2f}, have ${self.balance:,.2f}")
+                    return {"id": order_id, "state": "rejected", "reason": "insufficient_balance"}
+                self.balance -= cost
+                self._holdings[symbol] = self._holdings.get(symbol, 0) + qty
+            else:
+                held = self._holdings.get(symbol, 0)
+                if qty > held:
+                    qty = held  # Can only sell what we hold
+                notional = fill_price * qty
+                fee = notional * FEE_PCT
+                proceeds = notional - fee
+                self.balance += proceeds
+                self._holdings[symbol] = max(0, held - qty)
 
         logger.info(
             f"Mock order: {side} {asset_quantity} {symbol} @ ${fill_price:,.2f} "

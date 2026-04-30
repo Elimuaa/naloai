@@ -32,9 +32,9 @@ ASSET_CLASS_PRESETS = {
         # Strategy defaults
         "default_entry_z": 1.3,
         "default_lookback": 20,
-        "default_stop_loss_pct": 0.025,
+        "default_stop_loss_pct": 0.015,   # 1.5% SL → 3.3:1 R/R with 5% TP
         "default_take_profit_pct": 0.05,
-        "default_trail_stop_pct": 0.015,
+        "default_trail_stop_pct": 0.020,
         # Filter defaults
         "default_use_rsi_filter": True,
         "default_use_ema_filter": False,

@@ -25,7 +25,7 @@ def _get_client(user: User, force_demo: bool = False):
     """Return broker client based on user's broker_type setting.
     Routes to Capital.com, Tradovate, or Robinhood. Falls back to matching mock client.
     Caches the client to preserve internal state (e.g. demo balance)."""
-    broker = getattr(user, 'broker_type', 'robinhood') or 'robinhood'
+    broker = (getattr(user, 'broker_type', 'robinhood') or 'robinhood').lower().strip()
     mode_key = 'demo' if force_demo else 'live'
     cache_key = f"{user.id}:{broker}:{mode_key}"
 
@@ -144,6 +144,11 @@ class BotState:
         self.partial_pnl_booked: float = 0.0        # P&L locked during the trade (added to total at close)
         # Adaptive R/R per trade
         self.adaptive_tp_pct: Optional[float] = None  # locked at entry based on regime
+        # ── Option A: second concurrent position (when signal_strength ≥ 0.70) ──
+        # Stores a lightweight dict for a second open trade on the same symbol.
+        # Keys: trade_id, entry_price, side, entry_z, quantity, trail_stop_price,
+        #       trade_open_time, adaptive_tp_pct, breakeven_moved
+        self.second_slot: Optional[dict] = None
 
 
 # Auto-optimization interval (run quantum optimizer every N ticks)
@@ -159,6 +164,9 @@ DEAD_ZONE_HOURS = {1, 11, 13, 18}
 MIN_COOLDOWN_SECONDS = 600  # 10 minutes — re-enter faster after a loss (was 15)
 
 bot_states: dict[str, BotState] = {}
+# Background task registry — prevents asyncio.create_task() results from being GC'd
+# before they complete. Tasks are removed on completion via the done-callback.
+_background_tasks: set = set()
 _bot_tasks: dict[str, asyncio.Task] = {}
 _client_cache: dict[str, object] = {}
 _risk_managers: dict[str, RiskManager] = {}
@@ -186,63 +194,102 @@ def _get_risk_manager(user: User) -> RiskManager:
     return rm
 
 
-async def start_bot(user_id: str, force_demo: bool = False):
-    if user_id in _bot_tasks and not _bot_tasks[user_id].done():
-        return {"status": "already_running"}
-    state = BotState(force_demo=force_demo)
-
-    # Recover open trade state from DB to prevent duplicate entries after restart.
-    # If multiple open trades exist (from prior restarts), force-close the extras.
+async def _recover_state_for_symbol(user_id: str, symbol: str, state: 'BotState'):
+    """Restore open-trade state from DB for a given symbol on restart.
+    Supports up to 2 open trades (primary + second_slot). Does NOT force-close extras;
+    leaves them in DB as-is so they can be managed by the running loop.
+    """
     try:
         async with AsyncSessionLocal() as db:
             result = await db.execute(
-                select(Trade).where(Trade.user_id == user_id, Trade.state == "open")
-                .order_by(Trade.opened_at.desc())
+                select(Trade).where(
+                    Trade.user_id == user_id,
+                    Trade.symbol == symbol,
+                    Trade.state == "open",
+                ).order_by(Trade.opened_at.asc())
             )
-            all_open = result.scalars().all()
+            open_trades = result.scalars().all()
 
-            if len(all_open) > 1:
-                # Force-close older duplicate trades — bot can only manage one at a time
-                extras = all_open[1:]
-                extra_ids = [t.id for t in extras]
-                from sqlalchemy import update as sa_update
-                await db.execute(
-                    sa_update(Trade).where(Trade.id.in_(extra_ids)).values(
-                        state="closed",
-                        exit_reason="force_closed_duplicate",
-                        closed_at=datetime.now(timezone.utc),
-                        pnl=0.0,
-                        pnl_pct=0.0,
-                    )
-                )
-                await db.commit()
-                logger.warning(f"Force-closed {len(extras)} duplicate open trades for {user_id}")
+            user_conf = await db.execute(select(User).where(User.id == user_id))
+            u = user_conf.scalar_one_or_none()
+            trail_pct = u.trail_stop_pct if u else 0.020
 
-            open_trade = all_open[0] if all_open else None
-            if open_trade and open_trade.entry_price:
-                state.in_trade = True
-                state.entry_price = float(open_trade.entry_price)
-                state.trade_side = open_trade.side
-                state.current_trade_id = open_trade.id
-                state.current_quantity = open_trade.quantity_value or float(open_trade.quantity)
-                # Set trailing stop based on entry price (updated with live price in loop)
-                user_conf = await db.execute(select(User).where(User.id == user_id))
-                u = user_conf.scalar_one_or_none()
-                trail_pct = u.trail_stop_pct if u else 0.015
-                ep = state.entry_price
-                state.trail_stop_price = ep * (1 - trail_pct) if open_trade.side == "buy" else ep * (1 + trail_pct)
-                logger.info(f"Restored open trade {open_trade.id[:8]} for {user_id}: {open_trade.side} @ {open_trade.entry_price}")
+            if open_trades:
+                # Restore primary slot (oldest open trade)
+                t = open_trades[0]
+                if t.entry_price:
+                    state.in_trade = True
+                    state.entry_price = float(t.entry_price)
+                    state.trade_side = t.side
+                    state.current_trade_id = t.id
+                    state.current_quantity = t.quantity_value or float(t.quantity)
+                    ep = state.entry_price
+                    state.trail_stop_price = ep * (1 - trail_pct) if t.side == "buy" else ep * (1 + trail_pct)
+                    logger.info(f"Restored primary trade {t.id[:8]} for {user_id}/{symbol}: {t.side} @ {t.entry_price}")
+
+            if len(open_trades) >= 2:
+                # Restore second slot
+                t2 = open_trades[1]
+                if t2.entry_price:
+                    ep2 = float(t2.entry_price)
+                    trail2 = ep2 * (1 - trail_pct) if t2.side == "buy" else ep2 * (1 + trail_pct)
+                    state.second_slot = {
+                        "trade_id": t2.id,
+                        "entry_price": ep2,
+                        "side": t2.side,
+                        "entry_z": 0.0,
+                        "quantity": t2.quantity_value or float(t2.quantity),
+                        "trail_stop_price": trail2,
+                        "trade_open_time": time.time(),
+                        "adaptive_tp_pct": None,
+                        "breakeven_moved": False,
+                    }
+                    logger.info(f"Restored second-slot trade {t2.id[:8]} for {user_id}/{symbol}")
+
     except Exception as e:
-        logger.error(f"Failed to restore open trade for {user_id}: {e}")
-        state.in_trade = False
-        state.entry_price = None
-        state.trade_side = None
-        state.current_trade_id = None
+        logger.error(f"Failed to restore open trades for {user_id}/{symbol}: {e}")
 
-    bot_states[user_id] = state
-    task = asyncio.create_task(_bot_loop(user_id), name=f"bot-{user_id}")
-    _bot_tasks[user_id] = task
-    return {"status": "started"}
+
+async def start_bot(user_id: str, force_demo: bool = False):
+    """Launch bot for a user. Starts 4 parallel loops for crypto users:
+    BTC-USD, ETH-USD, SOL-USD, DOGE-USD — giving ~12-16 trades/day per user.
+    Each loop has its own BotState so they manage positions independently.
+    For Gold/NAS100 brokers (Capital.com / Tradovate), only the primary symbol runs.
+    """
+    # Check if any loop is already running for this user
+    running_keys = [k for k, t in _bot_tasks.items() if k.startswith(f"{user_id}:") and not t.done()]
+    if running_keys:
+        return {"status": "already_running"}
+
+    # Fetch user config to determine broker / asset class
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+
+    primary_symbol = (user.trading_symbol if user else "BTC-USD") or "BTC-USD"
+
+    from broker_base import get_asset_class
+    _broker_cls = (getattr(user, 'broker_type', 'robinhood') or 'robinhood').lower().strip()
+    _asset_cls = get_asset_class(primary_symbol)
+
+    if _asset_cls == "crypto":
+        # All 4 major Robinhood crypto pairs — each gets its own independent loop.
+        # Order: BTC first so it warms up fastest; DOGE/SOL catch alt moves BTC misses.
+        symbols_to_run = ["BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD"]
+    else:
+        # Gold / NAS100 futures — single asset, no cross-symbol diversification
+        symbols_to_run = [primary_symbol]
+
+    for sym in symbols_to_run:
+        _state_key = f"{user_id}:{sym}"
+        state = BotState(force_demo=force_demo)
+        await _recover_state_for_symbol(user_id, sym, state)
+        bot_states[_state_key] = state
+        task = asyncio.create_task(_bot_loop(user_id, sym), name=f"bot-{user_id}-{sym}")
+        _bot_tasks[_state_key] = task
+        logger.info(f"Launched bot loop for {user_id} symbol={sym}")
+
+    return {"status": "started", "symbols": symbols_to_run}
 
 
 async def stop_bot(user_id: str):
@@ -259,16 +306,27 @@ async def stop_bot(user_id: str):
                         await db2.commit()
                 except Exception as _e:
                     logger.warning(f"stop_bot: failed to persist demo_balance for {user_id}: {_e}")
-    if user_id in _bot_tasks:
-        _bot_tasks[user_id].cancel()
+
+    # Cancel ALL symbol-keyed tasks for this user
+    task_keys = [k for k in list(_bot_tasks.keys()) if k.startswith(f"{user_id}:")]
+    for tk in task_keys:
+        task = _bot_tasks[tk]
+        task.cancel()
         try:
-            await asyncio.wait_for(asyncio.shield(_bot_tasks[user_id]), timeout=5)
+            await asyncio.wait_for(asyncio.shield(task), timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
-        del _bot_tasks[user_id]
+        del _bot_tasks[tk]
+
+    # Clear state and client cache
+    state_keys = [k for k in list(bot_states.keys()) if k.startswith(f"{user_id}:")]
+    for sk in state_keys:
+        del bot_states[sk]
+
     for k in list(_client_cache.keys()):
         if k.startswith(user_id):
             del _client_cache[k]
+
     async with AsyncSessionLocal() as db:
         await db.execute(update(User).where(User.id == user_id).values(bot_active=False))
         await db.commit()
@@ -277,22 +335,49 @@ async def stop_bot(user_id: str):
 
 
 def get_bot_status(user_id: str) -> dict:
-    running = user_id in _bot_tasks and not _bot_tasks[user_id].done()
-    state = bot_states.get(user_id, BotState())
+    # Aggregate running status across all symbol loops for this user
+    running_tasks = {k: t for k, t in _bot_tasks.items()
+                     if k.startswith(f"{user_id}:") and not t.done()}
+    running = len(running_tasks) > 0
+
+    # Primary state: find most active (in-trade, or most recently updated)
+    user_states = {k: v for k, v in bot_states.items() if k.startswith(f"{user_id}:")}
+    # Prefer the state that is currently in trade
+    primary_state = None
+    for st in user_states.values():
+        if st.in_trade:
+            primary_state = st
+            break
+    if primary_state is None:
+        # Fall back to any state (last alphabetically for determinism)
+        if user_states:
+            primary_state = list(user_states.values())[-1]
+        else:
+            primary_state = BotState()
+
     risk_mgr = _risk_managers.get(user_id)
+
+    # Count total open positions across all symbol loops
+    open_position_count = sum(
+        (1 if st.in_trade else 0) + (1 if st.second_slot is not None else 0)
+        for st in user_states.values()
+    )
+
     return {
         "running": running,
-        "in_trade": state.in_trade,
-        "entry_price": state.entry_price,
-        "trade_side": state.trade_side,
-        "trail_stop": state.trail_stop_price,
-        "last_signal": state.last_signal,
-        "last_update": state.last_update,
-        "error_count": state.error_count,
-        "demo_mode": state.demo_mode,
-        "key_invalid": state.key_invalid,
-        "position_size": state.current_quantity,
+        "in_trade": primary_state.in_trade,
+        "entry_price": primary_state.entry_price,
+        "trade_side": primary_state.trade_side,
+        "trail_stop": primary_state.trail_stop_price,
+        "last_signal": primary_state.last_signal,
+        "last_update": primary_state.last_update,
+        "error_count": primary_state.error_count,
+        "demo_mode": primary_state.demo_mode,
+        "key_invalid": primary_state.key_invalid,
+        "position_size": primary_state.current_quantity,
         "risk": risk_mgr.get_status() if risk_mgr else None,
+        "open_position_count": open_position_count,
+        "active_symbols": list(running_tasks.keys()),
     }
 
 
@@ -400,20 +485,21 @@ def _calculate_signal_strength(
 
 def _check_signal_filters(
     prices: list[float], side: str, user: User,
-    state: 'BotState', z_score: float
+    state: 'BotState', z_score: float, symbol: str = None
 ) -> tuple[bool, list[str]]:
     """Apply indicator filters + new advanced filters. Returns (passed, reasons_rejected)."""
     reasons = []
     current_price = prices[-1]
+    _effective_symbol = symbol or getattr(user, 'trading_symbol', 'BTC-USD')
 
     # ── TIME-OF-DAY FILTER (asset-class aware) ──
     from broker_base import get_asset_class, ASSET_CLASS_PRESETS
-    _asset_preset = ASSET_CLASS_PRESETS[get_asset_class(getattr(user, 'trading_symbol', 'BTC-USD'))]
+    _asset_preset = ASSET_CLASS_PRESETS[get_asset_class(_effective_symbol)]
     _dead_zone = _asset_preset["dead_zone_hours"]
-    _use_eth_corr = _asset_preset["use_eth_correlation"]
+    _use_eth_corr = _asset_preset["use_eth_correlation"] and _effective_symbol.upper() != "ETH-USD"
     current_hour = datetime.now(timezone.utc).hour
     if current_hour in _dead_zone:
-        reasons.append(f"Time filter: {current_hour}:00 UTC is outside trading hours for {user.trading_symbol}")
+        reasons.append(f"Time filter: {current_hour}:00 UTC is outside trading hours for {_effective_symbol}")
 
     # ── CONSECUTIVE LOSS COOLDOWN (time-based) ──
     if state.last_stop_loss_time is not None:
@@ -525,20 +611,32 @@ async def _close_trade(
     close_leg_pnl = price_diff * quantity
     pnl = close_leg_pnl + partial_pnl                      # ← TRUE total profit
     pnl_pct = (price_diff / entry_price) * 100 if entry_price > 0 else 0.0
-    async with AsyncSessionLocal() as db:
-        await db.execute(
-            update(Trade).where(Trade.id == trade_id).values(
-                exit_price=str(exit_price),
-                pnl=pnl,
-                pnl_pct=pnl_pct,
-                partial_pnl=partial_pnl,                   # ← persist for analytics
-                state="closed",
-                exit_reason=exit_reason,
-                closed_at=datetime.now(timezone.utc)
-            )
-        )
-        await db.commit()
-    asyncio.create_task(_run_ai_analysis(trade_id, {
+    # Retry once on transient DB errors — a failed close leaves an orphan open trade
+    for _attempt in range(2):
+        try:
+            async with AsyncSessionLocal() as db:
+                await db.execute(
+                    update(Trade).where(Trade.id == trade_id).values(
+                        exit_price=str(exit_price),
+                        pnl=pnl,
+                        pnl_pct=pnl_pct,
+                        partial_pnl=partial_pnl,                   # ← persist for analytics
+                        state="closed",
+                        exit_reason=exit_reason,
+                        closed_at=datetime.now(timezone.utc)
+                    )
+                )
+                await db.commit()
+            break  # success
+        except Exception as _dbe:
+            logger.error(f"_close_trade DB commit failed (attempt {_attempt+1}) for {trade_id}: {_dbe}")
+            if _attempt == 1:
+                logger.critical(
+                    f"TRADE CLOSE LOST for user {user_id} trade {trade_id}: "
+                    f"{side} {symbol} exit={exit_price} pnl={pnl:.2f} reason={exit_reason}. "
+                    f"Manually set state=closed in DB to fix."
+                )
+    _t = asyncio.create_task(_run_ai_analysis(trade_id, {
         "symbol": symbol,
         "side": side,
         "entry_price": entry_price,
@@ -549,10 +647,12 @@ async def _close_trade(
         "entry_z_score": entry_z,
         "exit_z_score": current_z,
         "duration_minutes": 0,
-    }, user_id))
+    }, user_id, symbol=symbol))
+    _background_tasks.add(_t)
+    _t.add_done_callback(_background_tasks.discard)
 
 
-async def _run_ai_analysis(trade_id: str, trade_data: dict, user_id: str):
+async def _run_ai_analysis(trade_id: str, trade_data: dict, user_id: str, symbol: str = "BTC-USD"):
     try:
         analysis = await analyze_trade(trade_data)
         async with AsyncSessionLocal() as db:
@@ -581,7 +681,8 @@ async def _run_ai_analysis(trade_id: str, trade_data: dict, user_id: str):
     try:
         calibration = await calibrate_after_trade(user_id)
         # Mark calibration tick to prevent optimizer from overwriting immediately
-        state = bot_states.get(user_id)
+        _state_key = f"{user_id}:{symbol}"
+        state = bot_states.get(_state_key)
         if state:
             state.last_calibration_tick = len(state.price_history)
         if calibration and calibration.get("applied_changes"):
@@ -601,18 +702,19 @@ async def _run_ai_analysis(trade_id: str, trade_data: dict, user_id: str):
         logger.error(f"Auto-calibration failed for {user_id}: {e}")
 
 
-async def _bot_loop(user_id: str):
-    logger.info(f"Bot started for user {user_id}")
-    state = bot_states.get(user_id, BotState())
+async def _bot_loop(user_id: str, symbol: str):
+    _state_key = f"{user_id}:{symbol}"
+    logger.info(f"Bot started for user {user_id} symbol={symbol}")
+    state = bot_states.get(_state_key, BotState())
 
     while True:
         try:
             user = await _get_user_config(user_id)
             if not user or not user.bot_active:
-                logger.info(f"Bot disabled for user {user_id}, stopping")
+                logger.info(f"Bot disabled for user {user_id} ({symbol}), stopping")
                 break
 
-            broker = getattr(user, 'broker_type', 'robinhood') or 'robinhood'
+            broker = (getattr(user, 'broker_type', 'robinhood') or 'robinhood').lower().strip()
             if broker == 'capital':
                 has_live_creds = bool(user.capital_api_key and user.capital_identifier)
             elif broker == 'tradovate':
@@ -633,7 +735,8 @@ async def _bot_loop(user_id: str):
             balance = client.balance if hasattr(client, 'balance') else (user.demo_balance or 10000.0)
             risk_mgr.reset_daily(balance)
 
-            symbol = user.trading_symbol
+            # symbol is passed as parameter — do not override with user.trading_symbol
+            # (allows ETH-USD loop to run alongside BTC-USD loop independently)
             lookback = int(user.lookback)
             stop_loss_pct = user.stop_loss_pct
             take_profit_pct = user.take_profit_pct
@@ -674,9 +777,14 @@ async def _bot_loop(user_id: str):
             if len(state.price_history) > 2000:
                 state.price_history = state.price_history[-2000:]
 
-            # Fetch ETH price for correlation filter (crypto only)
+            # Fetch ETH price for correlation filter (BTC/Robinhood only — skip for ETH loop
+            # and for Capital.com/Tradovate where ETH-USD is not a valid symbol)
             from broker_base import get_asset_class, ASSET_CLASS_PRESETS as _ACP
-            _use_eth_for_symbol = _ACP[get_asset_class(symbol)]["use_eth_correlation"]
+            _use_eth_for_symbol = (
+                _ACP[get_asset_class(symbol)]["use_eth_correlation"]
+                and symbol.upper() != "ETH-USD"
+                and broker == "robinhood"
+            )
             if _use_eth_for_symbol:
                 try:
                     eth_price = await client.get_current_price("ETH-USD")
@@ -776,14 +884,22 @@ async def _bot_loop(user_id: str):
             )
 
             # Demo: inject synthetic signals to ensure enough trades per day (~4-6 trades)
-            # 20% chance per tick × 10 ticks/min = ~2 signal chances/min when not in trade
+            # 20% chance per tick × 10 ticks/min = ~2 signal chances/min when not in trade.
+            # Signals are mutually exclusive: injecting bullish clears any stale bearish and vice versa.
+            # ── CRITICAL: only inject when z-score is elevated in the correct direction ──
+            # Without this gate, signals fire at z≈0 → z immediately "reverts" back → $0.02 exits.
+            # Requiring |z| >= 0.60 ensures the z-reversion exit fires meaningfully after real movement.
             if is_demo and not state.in_trade and len(state.price_history) >= lookback:
-                if random.random() < 0.20:
-                    if random.random() > 0.5:
+                if random.random() < 0.20 and z_score is not None and abs(z_score) >= 0.60:
+                    if z_score > 0:
+                        # Positive z → oversold relative to mean → buy the retest
                         bullish_retest = True
+                        bearish_retest = False   # prevent conflicting signal on same tick
                         state.bullish_levels.append(current_price)
                     else:
+                        # Negative z → overbought relative to mean → sell the retest
                         bearish_retest = True
+                        bullish_retest = False   # prevent conflicting signal on same tick
                         state.bearish_levels.append(current_price)
 
             # Classify market regime (runs every tick, cached for 5min by ai_screener)
@@ -954,7 +1070,7 @@ async def _bot_loop(user_id: str):
                     _elapsed_hours = (time.time() - state.trade_open_time) / 3600
 
                     # R-multiple (only used to gate z-reversion exit on profitable trades)
-                    sl_dist = ep * (user.stop_loss_pct or 0.025)
+                    sl_dist = ep * (user.stop_loss_pct if user.stop_loss_pct is not None else 0.015)
                     if sl_dist > 0:
                         if state.trade_side == "buy":
                             r_now = (current_price - ep) / sl_dist
@@ -964,7 +1080,11 @@ async def _bot_loop(user_id: str):
                         r_now = 0.0
 
                     # 1) Z-REVERSION — signal premise fulfilled, take the win
-                    if abs(z_score) < 0.3 and r_now > 0:
+                    # Require r_now >= 0.30 (captured ≥30% of 1R) before exiting on z-reversion.
+                    # This prevents $0.02 "wins" where z briefly dips below 0.3 before the
+                    # position has built any meaningful profit. Below 0.30R the trade is still
+                    # immature — let SL/TP/trail manage it instead.
+                    if abs(z_score) < 0.3 and r_now >= 0.30:
                         _time_limit_exit = True
                         _smart_exit_reason = "z_reverted"
                         logger.info(
@@ -1087,10 +1207,11 @@ async def _bot_loop(user_id: str):
 
                     # Telegram notification
                     if getattr(user, 'telegram_enabled', False):
-                        asyncio.create_task(notifications.notify_trade_closed(
+                        _nt = asyncio.create_task(notifications.notify_trade_closed(
                             symbol, state.trade_side, state.entry_price, current_price,
                             pnl, pnl_pct, exit_reason, is_demo
                         ))
+                        _background_tasks.add(_nt); _nt.add_done_callback(_background_tasks.discard)
 
                     # Check if risk manager paused trading
                     if risk_mgr.is_paused:
@@ -1099,7 +1220,8 @@ async def _bot_loop(user_id: str):
                             "message": risk_mgr.pause_reason,
                         })
                         if getattr(user, 'telegram_enabled', False):
-                            asyncio.create_task(notifications.notify_risk_pause(risk_mgr.pause_reason))
+                            _nt = asyncio.create_task(notifications.notify_risk_pause(risk_mgr.pause_reason))
+                            _background_tasks.add(_nt); _nt.add_done_callback(_background_tasks.discard)
 
                     state.in_trade = False
                     state.entry_price = None
@@ -1115,6 +1237,115 @@ async def _bot_loop(user_id: str):
                     state.adaptive_tp_pct = None
                     from broker_base import get_asset_class, ASSET_CLASS_PRESETS as _FQP
                     state.current_quantity = _FQP[get_asset_class(symbol)]["qty_step"]
+
+            # ── Option A: Second concurrent position exit ──
+            # Manages exit for the second simultaneous slot (opened when signal_strength ≥ 0.70).
+            # Uses simplified exit: SL/TP/trail/time-cap only (no partial exit on second slot).
+            if state.second_slot is not None:
+                s2 = state.second_slot
+                ep2 = s2["entry_price"]
+                side2 = s2["side"]
+                qty2 = s2["quantity"]
+                tp_pct2 = s2.get("adaptive_tp_pct") or take_profit_pct
+                sl2 = ep2 * (1 - stop_loss_pct) if side2 == "buy" else ep2 * (1 + stop_loss_pct)
+                tp2 = ep2 * (1 + tp_pct2) if side2 == "buy" else ep2 * (1 - tp_pct2)
+
+                # Update second slot trail stop
+                if side2 == "buy" and s2.get("trail_stop_price"):
+                    s2["trail_stop_price"] = max(s2["trail_stop_price"], current_price * (1 - adaptive_trail))
+                elif side2 == "sell" and s2.get("trail_stop_price"):
+                    s2["trail_stop_price"] = min(s2["trail_stop_price"], current_price * (1 + adaptive_trail))
+
+                # Breakeven on second slot
+                if not s2.get("breakeven_moved") and ep2 > 0:
+                    _tp2_dist = abs(tp2 - ep2)
+                    _profit2 = (current_price - ep2) if side2 == "buy" else (ep2 - current_price)
+                    if _profit2 >= _tp2_dist * 0.50:
+                        if side2 == "buy":
+                            sl2 = max(sl2, ep2)
+                        else:
+                            sl2 = min(sl2, ep2)
+                        s2["breakeven_moved"] = True
+                elif s2.get("breakeven_moved"):
+                    if side2 == "buy":
+                        sl2 = max(sl2, ep2)
+                    else:
+                        sl2 = min(sl2, ep2)
+
+                # Check exit conditions for second slot
+                exit_reason2 = None
+                _elapsed2 = (time.time() - s2["trade_open_time"]) / 3600
+                _profit_pct2 = (current_price - ep2) / ep2 if side2 == "buy" else (ep2 - current_price) / ep2
+                # Same minimum-R gate as primary slot: require ≥30% of 1R captured before z-revert exit
+                _sl_dist2 = ep2 * (user.stop_loss_pct if user.stop_loss_pct is not None else 0.015)
+                _r_now2 = (_profit_pct2 * ep2) / _sl_dist2 if _sl_dist2 > 0 else 0.0
+                if abs(z_score) < 0.3 and _r_now2 >= 0.30:
+                    exit_reason2 = "z_reverted"
+                elif _elapsed2 >= 5.0:
+                    exit_reason2 = "time_limit"
+                elif side2 == "buy":
+                    if current_price <= sl2:
+                        exit_reason2 = "stop_loss"
+                    elif current_price >= tp2:
+                        exit_reason2 = "take_profit"
+                    elif s2.get("trail_stop_price") and current_price <= s2["trail_stop_price"]:
+                        exit_reason2 = "trailing_stop"
+                else:
+                    if current_price >= sl2:
+                        exit_reason2 = "stop_loss"
+                    elif current_price <= tp2:
+                        exit_reason2 = "take_profit"
+                    elif s2.get("trail_stop_price") and current_price >= s2["trail_stop_price"]:
+                        exit_reason2 = "trailing_stop"
+
+                if exit_reason2:
+                    close_side2 = "sell" if side2 == "buy" else "buy"
+                    if not is_demo:
+                        try:
+                            await client.place_market_order(symbol, close_side2, str(qty2))
+                        except Exception as _e2:
+                            logger.error(f"Close slot2 order failed for {user_id}: {_e2}")
+                    else:
+                        await client.place_market_order(symbol, close_side2, str(qty2))
+
+                    _diff2 = (current_price - ep2) if side2 == "buy" else (ep2 - current_price)
+                    _pnl2 = _diff2 * qty2
+                    _pnl_pct2 = (_diff2 / ep2) * 100 if ep2 > 0 else 0.0
+
+                    await _close_trade(
+                        user_id, s2["trade_id"], current_price, exit_reason2,
+                        ep2, side2, s2.get("entry_z", 0.0), z_score,
+                        symbol=symbol, quantity=qty2,
+                    )
+                    risk_mgr.record_trade_close(_pnl2, exit_reason2, total_pnl=_pnl2)
+
+                    if _pnl2 < 0:
+                        state.consecutive_losses += 1
+                        state.consecutive_wins = 0
+                    else:
+                        state.consecutive_losses = 0
+                        state.consecutive_wins += 1
+
+                    if is_demo and hasattr(client, 'balance'):
+                        async with AsyncSessionLocal() as _db2:
+                            await _db2.execute(
+                                update(User).where(User.id == user_id).values(demo_balance=round(client.balance, 2))
+                            )
+                            await _db2.commit()
+
+                    state.second_slot = None
+                    logger.info(f"Second slot closed for {user_id}/{symbol}: {exit_reason2} @ {current_price}, P&L ${_pnl2:.2f}")
+                    await ws_manager.send_to_user(user_id, {
+                        "type": "trade_closed",
+                        "symbol": symbol,
+                        "exit_price": current_price,
+                        "exit_reason": exit_reason2,
+                        "pnl": round(_pnl2, 2),
+                        "pnl_pct": round(_pnl_pct2, 2),
+                        "demo_mode": is_demo,
+                        "demo_balance": round(client.balance, 2) if is_demo and hasattr(client, 'balance') else None,
+                        "slot": "second",
+                    })
 
             # ── Entry logic ──
             elif not state.in_trade:
@@ -1146,7 +1377,7 @@ async def _bot_loop(user_id: str):
                         if entry_side:
                             # Apply indicator filters (now includes multi-TF, regime, time, correlation)
                             passed, filter_reasons = _check_signal_filters(
-                                state.price_history, entry_side, user, state, z_score
+                                state.price_history, entry_side, user, state, z_score, symbol=symbol
                             )
                             is_premium_user = getattr(user, 'is_premium', False)
 
@@ -1165,11 +1396,17 @@ async def _bot_loop(user_id: str):
                                             passed = False
                                             filter_reasons = [f"Volatility squeeze: BB width {_bb_w:.4f} < 50% of avg {_avg_bb_w:.4f} — market coiling"]
 
-                            if not passed and not is_demo:
-                                state.last_signal = f"Signal filtered: {filter_reasons[0]}"
-                                logger.info(f"Signal filtered for {user_id}: {filter_reasons}")
-                            elif not passed and is_demo and random.random() > 0.3:
-                                state.last_signal = f"Signal filtered: {filter_reasons[0]}"
+                            # Gate: allow entry if filters passed, OR demo 30% bypass for trade volume.
+                            # The bypass still runs the signal quality gate inside — only the
+                            # indicator filters (RSI/ADX/BB) are relaxed, not the strength floor.
+                            _allow_entry = passed
+                            if not passed and is_demo and random.random() < 0.30:
+                                _allow_entry = True  # 30% bypass for demo volume
+                            if not _allow_entry:
+                                if filter_reasons:
+                                    state.last_signal = f"Signal filtered: {filter_reasons[0]}"
+                                if not is_demo:
+                                    logger.info(f"Signal filtered for {user_id}: {filter_reasons}")
                             else:
                                 # Calculate signal strength for position sizing
                                 signal_strength = _calculate_signal_strength(
@@ -1301,7 +1538,11 @@ async def _bot_loop(user_id: str):
                                             _long = state.price_history[-50:]
                                             _short_std = (sum((p - sum(_short)/10)**2 for p in _short) / 10) ** 0.5
                                             _long_std = (sum((p - sum(_long)/50)**2 for p in _long) / 50) ** 0.5
-                                            if _long_std > 0 and _short_std / _long_std > 2.0:
+                                            import math as _math
+                                            if (_long_std > 0
+                                                    and not _math.isnan(_short_std)
+                                                    and not _math.isnan(_long_std)
+                                                    and _short_std / _long_std > 2.0):
                                                 strength_mult *= 0.50
                                                 logger.info(f"Vol-spike guard: short/long σ = {_short_std/_long_std:.2f} → halving size")
                                         quantity = round(base_qty * strength_mult, 8)
@@ -1402,9 +1643,95 @@ async def _bot_loop(user_id: str):
 
                                     # Telegram notification
                                     if getattr(user, 'telegram_enabled', False):
-                                        asyncio.create_task(notifications.notify_trade_opened(
+                                        _nt = asyncio.create_task(notifications.notify_trade_opened(
                                             symbol, entry_side, current_price, quantity, is_demo
                                         ))
+                                        _background_tasks.add(_nt); _nt.add_done_callback(_background_tasks.discard)
+
+            # ── Option A: Second concurrent position entry ──
+            # When the primary slot is occupied AND a new high-confidence signal fires,
+            # open a second independent position on the same symbol.
+            # Requires signal_strength ≥ 0.70 and risk manager not paused.
+            elif state.in_trade and state.second_slot is None:
+                _cur_bal_s2 = client.balance if hasattr(client, 'balance') else balance
+                _daily_tgt_s2 = max(200.0, _cur_bal_s2 * 0.02)
+                _s2_daily_ok = risk_mgr.daily_pnl < _daily_tgt_s2
+                _s2_can_trade, _ = risk_mgr.can_trade()
+                if _s2_daily_ok and _s2_can_trade and (bullish_retest or bearish_retest):
+                    _s2_side = "buy" if bullish_retest else "sell"
+                    # Only enter second slot in same direction as primary (don't hedge)
+                    if _s2_side == state.trade_side:
+                        _s2_passed, _ = _check_signal_filters(
+                            state.price_history, _s2_side, user, state, z_score, symbol=symbol
+                        )
+                        if _s2_passed or is_demo:
+                            _s2_strength = _calculate_signal_strength(
+                                z_score, state.slow_z_score, state.regime,
+                                state.indicators, _s2_side
+                            )
+                            if _s2_strength >= 0.70:
+                                # Position size for second slot: half of normal (risk control)
+                                _s2_base_qty = risk_mgr.calculate_position_size(
+                                    _cur_bal_s2, current_price, stop_loss_pct, state.price_history
+                                )
+                                _s2_qty = round(_s2_base_qty * 0.5 * min(3.0, _s2_strength * 2.0), 8)
+                                from broker_base import get_asset_class, ASSET_CLASS_PRESETS as _S2QP
+                                _s2_preset = _S2QP[get_asset_class(symbol)]
+                                _s2_qty = max(_s2_preset["qty_step"], round(round(_s2_qty / _s2_preset["qty_step"]) * _s2_preset["qty_step"], _s2_preset["qty_precision"]))
+                                if _s2_preset["qty_precision"] == 0:
+                                    _s2_qty = int(_s2_qty)
+                                _s2_qty_str = f"{_s2_qty:.8f}".rstrip('0').rstrip('.') if isinstance(_s2_qty, float) else str(_s2_qty)
+
+                                _s2_order_ok = True
+                                if not is_demo:
+                                    try:
+                                        await client.place_market_order(symbol, _s2_side, _s2_qty_str)
+                                    except Exception as _e2:
+                                        logger.warning(f"Second slot entry order failed for {user_id}: {_e2}")
+                                        _s2_order_ok = False
+                                else:
+                                    _s2_demo_order = await client.place_market_order(symbol, _s2_side, _s2_qty_str)
+                                    if _s2_demo_order.get("state") == "rejected":
+                                        _s2_order_ok = False
+
+                                if _s2_order_ok:
+                                    _s2_ind_snap = json.dumps({k: (round(v, 4) if isinstance(v, (int, float)) else v) for k, v in state.indicators.items()})
+                                    _s2_trade_id = await _save_trade(user_id, {
+                                        "symbol": symbol,
+                                        "side": _s2_side,
+                                        "quantity": _s2_qty_str,
+                                        "quantity_value": _s2_qty,
+                                        "initial_quantity": _s2_qty,
+                                        "entry_price": str(current_price),
+                                        "state": "open",
+                                        "is_demo": is_demo,
+                                        "indicators_snapshot": _s2_ind_snap,
+                                        "opened_at": datetime.now(timezone.utc),
+                                    })
+                                    _s2_sl_adj, _s2_tp_adj = _adaptive_rr(stop_loss_pct, take_profit_pct, state.regime, _s2_side)
+                                    _s2_trail = current_price * (1 - adaptive_trail) if _s2_side == "buy" else current_price * (1 + adaptive_trail)
+                                    state.second_slot = {
+                                        "trade_id": _s2_trade_id,
+                                        "entry_price": current_price,
+                                        "side": _s2_side,
+                                        "entry_z": z_score,
+                                        "quantity": _s2_qty,
+                                        "trail_stop_price": _s2_trail,
+                                        "trade_open_time": time.time(),
+                                        "adaptive_tp_pct": _s2_tp_adj,
+                                        "breakeven_moved": False,
+                                    }
+                                    logger.info(f"Second slot opened for {user_id}/{symbol}: {_s2_side} @ {current_price} qty={_s2_qty} strength={_s2_strength:.0%}")
+                                    await ws_manager.send_to_user(user_id, {
+                                        "type": "trade_opened",
+                                        "symbol": symbol,
+                                        "side": _s2_side,
+                                        "entry_price": current_price,
+                                        "demo_mode": is_demo,
+                                        "quantity": _s2_qty,
+                                        "slot": "second",
+                                        "demo_balance": round(client.balance, 2) if is_demo and hasattr(client, 'balance') else None,
+                                    })
 
             # Daily target progress for UI progress bar
             _cur_balance = client.balance if hasattr(client, 'balance') else balance
@@ -1463,4 +1790,4 @@ async def _bot_loop(user_id: str):
 
         await asyncio.sleep(POLL_INTERVAL)
 
-    logger.info(f"Bot loop ended for user {user_id}")
+    logger.info(f"Bot loop ended for user {user_id} symbol={symbol}")

@@ -350,7 +350,7 @@ export function Dashboard() {
       return true
     }).reverse()
     filteredTrades.forEach(t => {
-      bal += t.pnl!
+      bal += (t.pnl ?? 0)
       curve.push({ time: t.closed_at ? new Date(t.closed_at).toLocaleDateString() : '', balance: Math.round(bal * 100) / 100 })
       if (t.entry_price) markers.push({ time: t.opened_at ? new Date(t.opened_at).toLocaleTimeString() : '', price: parseFloat(t.entry_price), side: t.side })
     })
@@ -861,7 +861,7 @@ export function Dashboard() {
                         </linearGradient>
                       </defs>
                       <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#A0A3B1' }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
-                      <YAxis tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} width={60} domain={['auto', 'auto']} />
+                      <YAxis tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} width={72} domain={['auto', 'auto']} tickFormatter={(v: number) => `$${v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0)}`} />
                       <Tooltip contentStyle={{ backgroundColor: '#1A1B23', border: '1px solid #2A2B35', borderRadius: 8, fontSize: 12 }} />
                       <Area type="monotone" dataKey="price" stroke="#6366F1" fill="url(#priceGrad)" strokeWidth={2} dot={false} />
                       {botStatus?.entry_price && <ReferenceLine y={botStatus.entry_price} stroke="#10B981" strokeDasharray="3 3" label={{ value: 'Entry', fill: '#10B981', fontSize: 10 }} />}
@@ -995,8 +995,8 @@ export function Dashboard() {
                         </linearGradient>
                       </defs>
                       <XAxis dataKey="time" tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} />
-                      <YAxis tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} width={60} domain={['auto', 'auto']} />
-                      <Tooltip contentStyle={{ backgroundColor: '#1A1B23', border: '1px solid #2A2B35', borderRadius: 8, fontSize: 12 }} />
+                      <YAxis tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} width={72} domain={['auto', 'auto']} tickFormatter={(v: number) => `$${v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0)}`} />
+                      <Tooltip contentStyle={{ backgroundColor: '#1A1B23', border: '1px solid #2A2B35', borderRadius: 8, fontSize: 12 }} formatter={(v: number) => [`$${v.toFixed(2)}`, 'Balance']} />
                       <Area type="monotone" dataKey="balance" stroke="#10B981" fill="url(#eqGrad)" strokeWidth={2} dot={false} />
                     </AreaChart>
                   </ResponsiveContainer>
@@ -1190,8 +1190,8 @@ export function Dashboard() {
                   <AreaChart data={s.pnl_chart}>
                     <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#10B981" stopOpacity={0.3} /><stop offset="95%" stopColor="#10B981" stopOpacity={0} /></linearGradient></defs>
                     <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} />
-                    <YAxis tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} width={48} />
-                    <Tooltip contentStyle={{ backgroundColor: '#1A1B23', border: '1px solid #2A2B35', borderRadius: 8, fontSize: 12 }} />
+                    <YAxis tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} width={64} tickFormatter={(v: number) => `${v >= 0 ? '+' : ''}$${v.toFixed(0)}`} />
+                    <Tooltip contentStyle={{ backgroundColor: '#1A1B23', border: '1px solid #2A2B35', borderRadius: 8, fontSize: 12 }} formatter={(v: number) => [`${v >= 0 ? '+' : ''}$${v.toFixed(2)}`, 'P&L']} />
                     <Area type="monotone" dataKey="pnl" stroke="#10B981" fill="url(#g)" strokeWidth={2} dot={false} />
                   </AreaChart>
                 </ResponsiveContainer>

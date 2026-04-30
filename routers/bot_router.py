@@ -121,11 +121,13 @@ async def save_keys(
     for k in list(_client_cache.keys()):
         if k.startswith(current_user.id):
             del _client_cache[k]
-    if current_user.id in bot_states:
-        bot_states[current_user.id].key_invalid = False
-        bot_states[current_user.id].force_demo = False
+    # State keys are now "{user_id}:{symbol}" — update all matching
+    for sk in [k for k in bot_states if k.startswith(f"{current_user.id}:")]:
+        bot_states[sk].key_invalid = False
+        bot_states[sk].force_demo = False
 
-    if current_user.id in _bot_tasks and not _bot_tasks[current_user.id].done():
+    is_running = any(k.startswith(f"{current_user.id}:") and not t.done() for k, t in _bot_tasks.items())
+    if is_running:
         await stop_bot(current_user.id)
         await db.execute(update(User).where(User.id == current_user.id).values(bot_active=True))
         await db.commit()
@@ -194,7 +196,7 @@ async def bot_start(
     db: AsyncSession = Depends(get_db)
 ):
     mode = payload.mode
-    broker = getattr(current_user, 'broker_type', 'robinhood') or 'robinhood'
+    broker = (getattr(current_user, 'broker_type', 'robinhood') or 'robinhood').lower().strip()
 
     if mode == "live":
         if broker == 'robinhood' and not (current_user.rh_api_key and current_user.ed25519_private_key):
@@ -204,9 +206,23 @@ async def bot_start(
         elif broker == 'tradovate' and not (current_user.tradovate_username and current_user.tradovate_password):
             raise HTTPException(400, "Add your Tradovate credentials in Settings before going live")
 
-    from bot_engine import bot_states
-    if mode == "live" and broker == 'robinhood' and current_user.id in bot_states and bot_states[current_user.id].key_invalid:
+    from bot_engine import bot_states, _bot_tasks
+    _key_invalid = any(
+        st.key_invalid for k, st in bot_states.items() if k.startswith(f"{current_user.id}:")
+    )
+    if mode == "live" and broker == 'robinhood' and _key_invalid:
         raise HTTPException(400, "Your Robinhood API key is invalid — paste a new one in Settings first")
+
+    # ── Race guard: reject double-start before touching DB or spawning loops ──
+    # Two rapid POST /start requests can both pass the checks above before either
+    # has written to _bot_tasks, creating duplicate loops on the same symbol.
+    _already_running = any(
+        not t.done()
+        for k, t in _bot_tasks.items()
+        if k.startswith(f"{current_user.id}:")
+    )
+    if _already_running:
+        return {"status": "already_running", "mode": "demo" if force_demo else "live"}
 
     force_demo = (mode == "demo")
     await db.execute(update(User).where(User.id == current_user.id).values(bot_active=True))
@@ -216,9 +232,11 @@ async def bot_start(
     import notifications
     if getattr(current_user, 'telegram_enabled', False):
         import asyncio
-        asyncio.create_task(notifications.notify_bot_started(
+        from bot_engine import _background_tasks
+        _nt = asyncio.create_task(notifications.notify_bot_started(
             "demo" if force_demo else "live", current_user.trading_symbol
         ))
+        _background_tasks.add(_nt); _nt.add_done_callback(_background_tasks.discard)
 
     return {**result, "mode": "demo" if force_demo or not current_user.rh_api_key else "live"}
 
@@ -403,9 +421,9 @@ async def test_connection(current_user: User = Depends(get_current_user)):
                 buying_power = float(val)
                 break
         from bot_engine import bot_states
-        if current_user.id in bot_states:
-            bot_states[current_user.id].key_invalid = False
-            bot_states[current_user.id].force_demo = False
+        for _sk in [k for k in bot_states if k.startswith(f"{current_user.id}:")]:
+            bot_states[_sk].key_invalid = False
+            bot_states[_sk].force_demo = False
         return {"ok": True, "buying_power": buying_power, "account_fields": list(acct.keys())}
     except Exception as e:
         err = str(e)
@@ -432,17 +450,19 @@ async def set_demo_balance(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    bal = max(0, payload.balance)
+    bal = payload.balance
+    if bal < 100:
+        raise HTTPException(400, "Demo balance must be at least $100")
     await db.execute(update(User).where(User.id == current_user.id).values(demo_balance=bal))
     await db.commit()
 
     from bot_engine import _client_cache, _bot_tasks
-    _broker = getattr(current_user, 'broker_type', 'robinhood') or 'robinhood'
     for k in list(_client_cache.keys()):
         if k.startswith(current_user.id):
             del _client_cache[k]
 
-    if current_user.id in _bot_tasks and not _bot_tasks[current_user.id].done():
+    _is_running = any(k.startswith(f"{current_user.id}:") and not t.done() for k, t in _bot_tasks.items())
+    if _is_running:
         await stop_bot(current_user.id)
         await db.execute(update(User).where(User.id == current_user.id).values(bot_active=True))
         await db.commit()
@@ -467,9 +487,12 @@ async def clear_demo_balance(
     await db.commit()
 
     from bot_engine import _client_cache, _bot_tasks
-    _client_cache.pop(f"{current_user.id}:demo", None)
+    for k in list(_client_cache.keys()):
+        if k.startswith(current_user.id):
+            del _client_cache[k]
 
-    if current_user.id in _bot_tasks and not _bot_tasks[current_user.id].done():
+    _is_running2 = any(k.startswith(f"{current_user.id}:") and not t.done() for k, t in _bot_tasks.items())
+    if _is_running2:
         await stop_bot(current_user.id)
         await db.execute(update(User).where(User.id == current_user.id).values(bot_active=True))
         await db.commit()
@@ -704,7 +727,9 @@ async def optimize_params(
 ):
     """Run quantum-inspired parameter optimization on collected price history."""
     from bot_engine import bot_states
-    state = bot_states.get(current_user.id)
+    # Find state with most price history (primary symbol loop)
+    _user_states = {k: v for k, v in bot_states.items() if k.startswith(f"{current_user.id}:")}
+    state = max(_user_states.values(), key=lambda s: len(s.price_history), default=None) if _user_states else None
     if not state or len(state.price_history) < 50:
         raise HTTPException(400, "Need at least 50 price ticks. Let the bot run longer before optimizing.")
 

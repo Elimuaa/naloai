@@ -44,8 +44,10 @@ class User(Base):
     entry_z: Mapped[float] = mapped_column(Float, default=1.3)   # profit-optimized (was 1.5)
     exit_z: Mapped[float] = mapped_column(Float, default=0.5)
     lookback: Mapped[str] = mapped_column(String, default="20")
-    # Research-backed defaults: 2.5% SL / 5% TP = 2:1 R/R; 1.5% trail avoids micro-volatility exits
-    stop_loss_pct: Mapped[float] = mapped_column(Float, default=0.025)
+    # Profit-optimized defaults: 1.5% SL / 5% TP = 3.3:1 R/R; trail 1.5% to stay tight but not clip
+    # Tightened SL from 2.5% → 1.5%: a single stop-loss hit no longer wipes 4-5 small wins.
+    # TP stays at 5% — this gives a 3.3:1 ratio vs the old 2:1.
+    stop_loss_pct: Mapped[float] = mapped_column(Float, default=0.015)
     take_profit_pct: Mapped[float] = mapped_column(Float, default=0.05)
     trail_stop_pct: Mapped[float] = mapped_column(Float, default=0.020)
 
@@ -239,6 +241,9 @@ async def init_db():
             "UPDATE users SET max_stops_before_pause = 4 WHERE max_stops_before_pause = 3",
             # trail_stop_pct: 0.015 (old) -> 0.020 (new) — stop clipping winners on BTC noise
             "UPDATE users SET trail_stop_pct = 0.020 WHERE trail_stop_pct = 0.015",
+            # stop_loss_pct: 0.025 (old) -> 0.015 (new) — 3.3:1 R/R instead of 2:1
+            # Only update users who still have the old default (preserves manual customizations)
+            "UPDATE users SET stop_loss_pct = 0.015 WHERE stop_loss_pct = 0.025",
         ]
         for stmt in backfills:
             try:
