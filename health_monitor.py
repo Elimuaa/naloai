@@ -39,8 +39,11 @@ async def check_bot_loops() -> dict:
         uid = user.id
         active_count += 1
 
-        # Check if task exists and is running
-        if uid not in _bot_tasks or _bot_tasks[uid].done():
+        # Keys are now f"{user_id}:{symbol}" — check any loop for this user is alive
+        user_tasks = {k: t for k, t in _bot_tasks.items() if k.startswith(f"{uid}:")}
+        running = any(not t.done() for t in user_tasks.values())
+
+        if not running:
             issues.append(f"Bot task missing/dead for user {uid[:8]}. Attempting restart...")
             try:
                 from bot_engine import start_bot
@@ -50,25 +53,27 @@ async def check_bot_loops() -> dict:
                 issues[-1] += f" RESTART FAILED: {e}"
             continue
 
-        # Check if state is being updated (not stuck)
-        state = bot_states.get(uid)
-        if state and state.last_update:
-            try:
-                last = datetime.fromisoformat(state.last_update)
-                age_minutes = (datetime.now(timezone.utc) - last).total_seconds() / 60
-                # If no update in 10 minutes for demo (6s interval) or 5 minutes for live (60s interval)
-                max_age = 5 if not state.demo_mode else 10
-                if age_minutes > max_age:
-                    stuck_count += 1
-                    issues.append(
-                        f"Bot for {uid[:8]} may be stuck — last update {age_minutes:.0f}m ago"
-                    )
-            except (ValueError, TypeError):
-                pass
+        # Check if any symbol state is being updated (not stuck)
+        user_states = {k: v for k, v in bot_states.items() if k.startswith(f"{uid}:")}
+        for state_key, state in user_states.items():
+            if state and state.last_update:
+                try:
+                    last = datetime.fromisoformat(state.last_update)
+                    age_minutes = (datetime.now(timezone.utc) - last).total_seconds() / 60
+                    max_age = 5 if not state.demo_mode else 10
+                    if age_minutes > max_age:
+                        stuck_count += 1
+                        sym = state_key.split(":")[-1]
+                        issues.append(
+                            f"Bot for {uid[:8]} ({sym}) may be stuck — last update {age_minutes:.0f}m ago"
+                        )
+                except (ValueError, TypeError):
+                    pass
 
-        # Check for excessive errors
-        if state and state.error_count > 5:
-            issues.append(f"Bot for {uid[:8]} has {state.error_count} errors")
+            # Check for excessive errors
+            if state and state.error_count > 5:
+                sym = state_key.split(":")[-1]
+                issues.append(f"Bot for {uid[:8]} ({sym}) has {state.error_count} errors")
 
     return {
         "status": "ok" if not issues else "warning",
@@ -123,8 +128,9 @@ async def check_duplicate_open_trades() -> dict:
         counts = result.all()
 
     for user_id, count in counts:
-        if count > 1:
-            issues.append(f"User {user_id[:8]} has {count} open trades (expected max 1)")
+        # Max legitimate open trades: 4 symbols × 2 slots (primary + second_slot) = 8
+        if count > 8:
+            issues.append(f"User {user_id[:8]} has {count} open trades (expected max 8 across 4 symbols)")
 
     return {
         "status": "ok" if not issues else "critical",
@@ -192,15 +198,19 @@ async def check_live_demo_consistency() -> dict:
 
         for user in live_users:
             uid = user.id
-            state = bot_states.get(uid)
-            if state and state.demo_mode and not state.force_demo:
-                issues.append(
-                    f"User {uid[:8]} has API keys but is running in demo mode (possible key issue)"
-                )
-            if state and state.key_invalid:
-                issues.append(
-                    f"User {uid[:8]} has invalid API key flagged"
-                )
+            # Check across all symbol states for this user
+            user_states = [v for k, v in bot_states.items() if k.startswith(f"{uid}:")]
+            for state in user_states:
+                if state and state.demo_mode and not state.force_demo:
+                    issues.append(
+                        f"User {uid[:8]} has API keys but is running in demo mode (possible key issue)"
+                    )
+                    break  # one report per user is enough
+                if state and state.key_invalid:
+                    issues.append(
+                        f"User {uid[:8]} has invalid API key flagged"
+                    )
+                    break
 
     return {
         "status": "ok" if not issues else "warning",
