@@ -939,6 +939,7 @@ async def _bot_loop(user_id: str, symbol: str):
             if z_score is None:
                 await ws_manager.send_to_user(user_id, {
                     "type": "status_update",
+                    "symbol": symbol,
                     "price": current_price,
                     "z_score": 0.0,
                     "in_trade": False,
@@ -2003,6 +2004,7 @@ async def _bot_loop(user_id: str, symbol: str):
             # Send status update — hide strategy internals (z_score, indicators) from clients
             await ws_manager.send_to_user(user_id, {
                 "type": "status_update",
+                "symbol": symbol,
                 "price": current_price,
                 "in_trade": state.in_trade,
                 "entry_price": state.entry_price,

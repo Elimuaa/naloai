@@ -267,6 +267,10 @@ export function Dashboard() {
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const wsAuthFailedRef = useRef(false)
+  // Primary-symbol ref: keeps the latest trading_symbol available inside ws.onmessage
+  // without re-creating the WebSocket whenever settings changes. Status ticks for
+  // OTHER symbols (the parallel BTC/ETH/SOL/DOGE bots) must NOT overwrite the header.
+  const primarySymbolRef = useRef<string>('BTC-USD')
 
   const showToast = useCallback((msg: string, ok = true) => {
     setToast({ msg, ok })
@@ -372,12 +376,19 @@ export function Dashboard() {
       try {
         const d = JSON.parse(ev.data)
         if (d.type === 'status_update') {
-          if (d.price) setLivePrice(d.price)
-          if (typeof d.z_score === 'number') setLiveZ(d.z_score)
+          // Per-user bots run multiple parallel symbol loops (BTC/ETH/SOL/DOGE).
+          // Only ticks for the user's PRIMARY trading_symbol drive the header
+          // price/z/in-trade UI — other-symbol ticks would cause flicker.
+          const isPrimary = !d.symbol || d.symbol === primarySymbolRef.current
+          // Account-level fields (demo_balance, daily_pnl, daily_target) are global
+          // across all loops, so always accept them regardless of symbol.
           if (d.demo_balance != null) setLiveDemoBalance(d.demo_balance)
           if (typeof d.daily_pnl === 'number') setDailyPnl(d.daily_pnl)
           if (typeof d.daily_target === 'number') setDailyTarget(d.daily_target)
           if (typeof d.daily_progress_pct === 'number') setDailyProgressPct(d.daily_progress_pct)
+          if (!isPrimary) return
+          if (d.price) setLivePrice(d.price)
+          if (typeof d.z_score === 'number') setLiveZ(d.z_score)
           if (d.price) {
             setPriceHistory(prev => [...prev.slice(-120), { time: new Date().toLocaleTimeString(), price: d.price, z: d.z_score }])
           }
@@ -446,6 +457,7 @@ export function Dashboard() {
   // Market price poll
   useEffect(() => {
     const symbol = settings?.trading_symbol ?? 'BTC-USD'
+    primarySymbolRef.current = symbol
     let stale = false
     const fetchPrice = async () => {
       // Skip market price fetch when bot is running — bot sends its own price via WebSocket
