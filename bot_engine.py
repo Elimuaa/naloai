@@ -169,6 +169,12 @@ DEAD_ZONE_HOURS = {1, 11, 13, 18}
 # Minimum cooldown after stop loss (seconds)
 MIN_COOLDOWN_SECONDS = 600  # 10 minutes — re-enter faster after a loss (was 15)
 
+# Symbols where new entries are blocked but existing open positions still get managed.
+# Audit (298 closed trades, May 2026): ETH-USD posted 0/28 z-revert exits — the core
+# mean-reversion premise (z>=1.1 → return to z=0) never fired once. Net result was
+# −$18.37 of pure time-decay losses. Re-add once we have momentum-mode parameters.
+NO_NEW_ENTRY_SYMBOLS: set[str] = {"ETH-USD"}
+
 bot_states: dict[str, BotState] = {}
 # Background task registry — prevents asyncio.create_task() results from being GC'd
 # before they complete. Tasks are removed on completion via the done-callback.
@@ -355,8 +361,11 @@ async def start_bot(user_id: str, force_demo: bool = False):
     _asset_cls = get_asset_class(primary_symbol)
 
     if _asset_cls == "crypto":
-        # All 4 major Robinhood crypto pairs — each gets its own independent loop.
-        # Order: BTC first so it warms up fastest; DOGE/SOL catch alt moves BTC misses.
+        # All 4 loops still spawn so existing open positions on any symbol are managed
+        # to close. New entries on ETH-USD are blocked at the entry gate (see
+        # NO_NEW_ENTRY_SYMBOLS below) — 298-trade audit showed 0/28 z_reverts on ETH,
+        # i.e. mean-reversion premise never fired. Once existing ETH positions close
+        # the loop idles cheaply.
         symbols_to_run = ["BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD"]
     else:
         # Gold / NAS100 futures — single asset, no cross-symbol diversification
@@ -1621,8 +1630,18 @@ async def _bot_loop(user_id: str, symbol: str):
                             signal = f"Bearish retest @ ${current_price:,.2f} (Z={z_score:.2f})"
 
                         if entry_side:
+                            # ── SYMBOL-LEVEL ENTRY GATE ──
+                            # Audit on 298 closed trades found ETH-USD posted 0/28 z-reverts
+                            # (mean-reversion premise never fires) → −$18.37 net of pure decay.
+                            # Block new entries on disabled symbols; existing open positions
+                            # still get managed to close by the same loop.
+                            if symbol in NO_NEW_ENTRY_SYMBOLS:
+                                state.last_signal = f"{symbol} entries paused (0% z-revert hist) — Z={z_score:.2f}"
+                                entry_side = None
+                                # Skip the rest of the entry pipeline
+                                pass
                             # Apply indicator filters (now includes multi-TF, regime, time, correlation)
-                            passed, filter_reasons = _check_signal_filters(
+                            passed, filter_reasons = (False, ["symbol disabled"]) if not entry_side else _check_signal_filters(
                                 state.price_history, entry_side, user, state, z_score, symbol=symbol
                             )
                             is_premium_user = getattr(user, 'is_premium', False)
@@ -1964,7 +1983,7 @@ async def _bot_loop(user_id: str, symbol: str):
                 if _s2_can_trade and (bullish_retest or bearish_retest):
                     _s2_side = "buy" if bullish_retest else "sell"
                     # Only enter second slot in same direction as primary (don't hedge)
-                    if _s2_side == state.trade_side:
+                    if _s2_side == state.trade_side and symbol not in NO_NEW_ENTRY_SYMBOLS:
                         _s2_passed, _ = _check_signal_filters(
                             state.price_history, _s2_side, user, state, z_score, symbol=symbol
                         )
