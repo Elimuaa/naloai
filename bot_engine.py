@@ -1029,17 +1029,45 @@ async def _bot_loop(user_id: str, symbol: str):
                 elif _r_multiple >= 1.5:
                     adaptive_trail = max(adaptive_trail * 0.60, 0.005)   # min 0.5%
 
+            # ── TRAIL ACTIVATION GATE ──
+            # The previous behavior set the trail stop at entry-trail% on tick #1, so any
+            # normal price wobble hit it before the trade had a cushion. That cost
+            # avg −$9.64 per trail-stop exit across 46 trades (= −$215.79 net leak).
+            # New rule: trail stays None until profit reaches +0.5R, then it arms at
+            # current_price - adaptive_trail. After arming, it ratchets toward price
+            # exactly like before (one-way ladder, never widens).
             if state.in_trade and state.entry_price:
-                if state.trade_side == "buy" and state.trail_stop_price:
-                    state.trail_stop_price = max(
-                        state.trail_stop_price,
-                        current_price * (1 - adaptive_trail)
-                    )
-                elif state.trade_side == "sell" and state.trail_stop_price:
-                    state.trail_stop_price = min(
-                        state.trail_stop_price,
-                        current_price * (1 + adaptive_trail)
-                    )
+                _ep = state.entry_price
+                _profit_r = 0.0
+                if stop_loss_pct > 0:
+                    if state.trade_side == "buy":
+                        _profit_r = ((current_price - _ep) / _ep) / stop_loss_pct
+                    else:
+                        _profit_r = ((_ep - current_price) / _ep) / stop_loss_pct
+
+                if state.trail_stop_price is None:
+                    # Arm only after the trade is genuinely in profit (≥0.5R).
+                    if _profit_r >= 0.5:
+                        state.trail_stop_price = (
+                            current_price * (1 - adaptive_trail) if state.trade_side == "buy"
+                            else current_price * (1 + adaptive_trail)
+                        )
+                        logger.info(
+                            f"Trail armed for {user_id}/{symbol} at {_profit_r:.2f}R: "
+                            f"price={current_price:.4f} trail={state.trail_stop_price:.4f}"
+                        )
+                else:
+                    # Already armed — ratchet toward price (never loosen).
+                    if state.trade_side == "buy":
+                        state.trail_stop_price = max(
+                            state.trail_stop_price,
+                            current_price * (1 - adaptive_trail)
+                        )
+                    else:
+                        state.trail_stop_price = min(
+                            state.trail_stop_price,
+                            current_price * (1 + adaptive_trail)
+                        )
 
             # ── Exit logic ──
             if state.in_trade and state.entry_price and state.current_trade_id:
@@ -1422,11 +1450,25 @@ async def _bot_loop(user_id: str, symbol: str):
                 sl2 = ep2 * (1 - stop_loss_pct) if side2 == "buy" else ep2 * (1 + stop_loss_pct)
                 tp2 = ep2 * (1 + tp_pct2) if side2 == "buy" else ep2 * (1 - tp_pct2)
 
-                # Update second slot trail stop
-                if side2 == "buy" and s2.get("trail_stop_price"):
-                    s2["trail_stop_price"] = max(s2["trail_stop_price"], current_price * (1 - adaptive_trail))
-                elif side2 == "sell" and s2.get("trail_stop_price"):
-                    s2["trail_stop_price"] = min(s2["trail_stop_price"], current_price * (1 + adaptive_trail))
+                # Second-slot trail: same activation gate as primary — arm only at +0.5R profit
+                _profit_r2 = 0.0
+                if stop_loss_pct > 0:
+                    if side2 == "buy":
+                        _profit_r2 = ((current_price - ep2) / ep2) / stop_loss_pct
+                    else:
+                        _profit_r2 = ((ep2 - current_price) / ep2) / stop_loss_pct
+
+                if not s2.get("trail_stop_price"):
+                    if _profit_r2 >= 0.5:
+                        s2["trail_stop_price"] = (
+                            current_price * (1 - adaptive_trail) if side2 == "buy"
+                            else current_price * (1 + adaptive_trail)
+                        )
+                else:
+                    if side2 == "buy":
+                        s2["trail_stop_price"] = max(s2["trail_stop_price"], current_price * (1 - adaptive_trail))
+                    else:
+                        s2["trail_stop_price"] = min(s2["trail_stop_price"], current_price * (1 + adaptive_trail))
 
                 # Breakeven on second slot
                 if not s2.get("breakeven_moved") and ep2 > 0:
@@ -1881,10 +1923,10 @@ async def _bot_loop(user_id: str, symbol: str):
                                     _sl_adj, _tp_adj = _adaptive_rr(stop_loss_pct, take_profit_pct, state.regime, entry_side)
                                     state.adaptive_tp_pct = _tp_adj
                                     logger.info(f"Adaptive R/R for {user_id}: regime={state.regime} SL={_sl_adj:.3f} TP={_tp_adj:.3f}")
-                                    state.trail_stop_price = (
-                                        current_price * (1 - adaptive_trail) if entry_side == "buy"
-                                        else current_price * (1 + adaptive_trail)
-                                    )
+                                    # Leave trail unset at entry — arming gate above
+                                    # turns it on after +0.5R profit. Eliminates false
+                                    # trail-stop exits on early adverse wobble.
+                                    state.trail_stop_price = None
                                     # Persist demo balance after entry deduction
                                     if is_demo and hasattr(client, 'balance'):
                                         async with AsyncSessionLocal() as db2:
@@ -1971,7 +2013,9 @@ async def _bot_loop(user_id: str, symbol: str):
                                         "opened_at": datetime.now(timezone.utc),
                                     })
                                     _s2_sl_adj, _s2_tp_adj = _adaptive_rr(stop_loss_pct, take_profit_pct, state.regime, _s2_side)
-                                    _s2_trail = current_price * (1 - adaptive_trail) if _s2_side == "buy" else current_price * (1 + adaptive_trail)
+                                    # Trail starts disarmed — second-slot trail-update block above
+                                    # arms it once profit ≥ 0.5R, mirroring the primary-slot rule.
+                                    _s2_trail = None
                                     state.second_slot = {
                                         "trade_id": _s2_trade_id,
                                         "entry_price": current_price,
