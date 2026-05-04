@@ -58,10 +58,20 @@ async def lifespan(app: FastAPI):
         position_size_mode="dynamic",
     )
     async with AsyncSessionLocal() as db:
-        await db.execute(_up(User).values(**PROFIT_PARAMS))
+        # Only apply defaults to users who have NEVER been AI-calibrated.
+        # calibration_count == 0 means the AI optimizer hasn't tuned them yet.
+        # This preserves hard-won calibrated parameters across deploys — previously
+        # every redeploy silently wiped AI-calibrated settings for every user.
+        result = await db.execute(
+            _up(User)
+            .where(User.calibration_count == 0)
+            .values(**PROFIT_PARAMS)
+        )
+        affected = result.rowcount
         await db.commit()
     logger.info(
-        "Startup: SCALP MODE applied to ALL users — "
+        f"Startup: SCALP MODE applied to {affected} uncalibrated users "
+        "(calibrated users preserved) — "
         "SL=0.5%, TP=2% (4:1 R/R), trail=0.5%, z-revert min=$15, "
         "entry_z=1.1, risk=2.5%, exposure=60%, target=$200+/day"
     )

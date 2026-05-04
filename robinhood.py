@@ -155,8 +155,9 @@ class RobinhoodCryptoClient:
                 r = await client.get(f"https://api.coinbase.com/v2/prices/{symbol}/spot", timeout=10)
                 if r.is_success:
                     return float(r.json()["data"]["amount"])
-        except Exception:
-            pass
+                logger.warning(f"Coinbase price fallback non-success for {symbol}: HTTP {r.status_code}")
+        except Exception as e:
+            logger.warning(f"Coinbase price fallback FAILED for {symbol}: {e}. Returning 0.0 (caller should retry).")
         return 0.0
 
     async def get_portfolio_cash(self) -> float:

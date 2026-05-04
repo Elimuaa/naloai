@@ -1,4 +1,5 @@
 import os
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from fastapi import Depends, HTTPException, status, Request
@@ -7,6 +8,9 @@ from pwdlib import PasswordHash
 import jwt
 from database import get_db, User, AsyncSession
 from sqlalchemy import select
+
+_auth_logger = logging.getLogger(__name__)
+
 
 def _get_or_create_secret(env_var: str) -> str:
     """Load secret from env; if missing, generate once and persist to .env so it survives restarts."""
@@ -19,8 +23,16 @@ def _get_or_create_secret(env_var: str) -> str:
         with open(env_path, "a") as f:
             f.write(f"\n{env_var}={new_val}\n")
         os.environ[env_var] = new_val
-    except Exception:
-        pass
+        _auth_logger.info(f"Generated and persisted new {env_var} to {env_path}")
+    except Exception as e:
+        # CRITICAL: if we can't persist, every restart invalidates ALL existing JWTs.
+        # This is a security/UX regression — log loud so ops sees it.
+        _auth_logger.error(
+            f"Could not persist {env_var} to .env ({e}). "
+            f"Generated in-memory only — all sessions will be invalidated on next restart. "
+            f"Set {env_var} in your environment to fix permanently."
+        )
+        os.environ[env_var] = new_val
     return new_val
 
 SECRET_KEY = _get_or_create_secret("JWT_SECRET_KEY")

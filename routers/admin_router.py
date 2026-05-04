@@ -336,8 +336,8 @@ async def admin_reset_all(
         if user.bot_active:
             try:
                 await stop_bot(user.id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"admin reset: stop_bot({user.id}) failed: {e}")
 
     # Delete all trades
     await db.execute(Trade.__table__.delete())
@@ -427,7 +427,7 @@ async def admin_apply_optimal_settings(
             "expected_win_value": "$200 at $10k account",
             "expected_loss_value": "$100 at $10k account",
             "break_even_win_rate": "34%",
-            "daily_target": "$200-300 (needs 1-2 wins/day)",
+            "daily_target": "$200 min or 2.5% of balance (compounds, never caps profit)",
             "filters": "RSI+ADX+BBands ON, EMA OFF",
         },
     }
@@ -451,8 +451,8 @@ async def admin_reset_user(
     if user.bot_active:
         try:
             await stop_bot(user_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"admin delete-user: stop_bot({user_id}) failed: {e}")
 
     # Delete user's trades
     await db.execute(Trade.__table__.delete().where(Trade.user_id == user_id))

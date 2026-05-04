@@ -35,7 +35,7 @@ PARAM_BOUNDS = {
     "cooldown_ticks": (2, 15),
 }
 
-CALIBRATION_PROMPT = """You are Nalo.Ai's auto-calibration engine. Your job is to analyze recent trade history and recommend parameter adjustments to improve future profitability.
+CALIBRATION_PROMPT = """You are Nalo.Ai's auto-calibration engine. Your job is to analyze recent trade history AND the system's permanent strategy memory to recommend parameter adjustments that improve future profitability.
 
 CURRENT PARAMETERS:
 {current_params}
@@ -56,6 +56,22 @@ PERFORMANCE SUMMARY:
 - Stop loss exits: {stop_losses}
 - Take profit exits: {take_profits}
 - Trailing stop exits: {trailing_stops}
+
+PERMANENT STRATEGY MEMORY (aggregated across ALL trades this user has ever made):
+The system bucketed every closed trade by (symbol/side/hour/regime/signal_strength/z_band) and tracked win-rate + avg P&L per bucket. These are the user's HIGHEST-EDGE and LOWEST-EDGE setups:
+
+TOP 5 PROFITABLE BUCKETS (keep doing these):
+{best_recipes}
+
+BOTTOM 5 LOSING BUCKETS (avoid or filter these):
+{worst_recipes}
+
+When choosing parameters, consider:
+- If losing buckets cluster in a hour, suggest tightening dead_zone via a comment.
+- If winning buckets fire at high z-scores (≥2.0), it's safe to RAISE entry_z.
+- If losing buckets fire at low z-scores (<1.5), entry_z is too low — raise it.
+- If best buckets exit on take_profit consistently, current TP is well-tuned.
+- If best buckets exit on trailing_stop, the runner is profitable — widen TP further.
 
 PARAMETER BOUNDS (you MUST stay within these):
 {param_bounds}
@@ -109,13 +125,20 @@ async def calibrate_after_trade(user_id: str) -> dict | None:
         if not user or not user.is_premium:
             return None
 
-        # Get total closed trade count for over-fit guard
+        # Demo and live BOTH count. Prices, indicators, regimes, and SL/TP/trail
+        # exits are computed from the real live market — only the fill is simulated.
+        # Treating demo trades as "not real learning" throws away thousands of valid
+        # market observations. Strategy memory tags origin separately for queries
+        # that need to weight live higher.
         from sqlalchemy import func as _f
         total_closed = (await db.execute(
-            select(_f.count(Trade.id)).where(Trade.user_id == user_id, Trade.state == "closed")
+            select(_f.count(Trade.id)).where(
+                Trade.user_id == user_id,
+                Trade.state == "closed",
+            )
         )).scalar() or 0
 
-        # Get last 30 closed trades for analysis
+        # Get last 30 closed trades (demo + live)
         result = await db.execute(
             select(Trade)
             .where(Trade.user_id == user_id, Trade.state == "closed")
@@ -195,6 +218,19 @@ async def calibrate_after_trade(user_id: str) -> dict | None:
         "cooldown_ticks": getattr(user, 'cooldown_ticks', 5) or 5,
     }
 
+    # Pull aggregated bucket stats from the permanent strategy memory.
+    # This is THE knowledge base — every trade this user has ever made,
+    # condensed into win-rate per condition. Far richer than 30 raw trades.
+    try:
+        from strategy_memory import top_recipes
+        recipes = await top_recipes(user_id, n=5, min_samples=10)
+        # Fall back to global cross-user stats if user is too new for own buckets
+        if not recipes["best"] and not recipes["worst"]:
+            recipes = await top_recipes(None, n=5, min_samples=10)
+    except Exception as _e:
+        logger.debug(f"Strategy memory unavailable for calibration: {_e}")
+        recipes = {"best": [], "worst": []}
+
     prompt = CALIBRATION_PROMPT.format(
         current_params=json.dumps(current_params, indent=2),
         trade_count=len(trades),
@@ -212,6 +248,8 @@ async def calibrate_after_trade(user_id: str) -> dict | None:
         stop_losses=stop_losses,
         take_profits=take_profits,
         trailing_stops=trailing_stops,
+        best_recipes=json.dumps(recipes["best"], indent=2) if recipes["best"] else "(insufficient data — need 10+ trades per bucket)",
+        worst_recipes=json.dumps(recipes["worst"], indent=2) if recipes["worst"] else "(insufficient data)",
         param_bounds=json.dumps({k: {"min": v[0], "max": v[1]} for k, v in PARAM_BOUNDS.items()}, indent=2),
     )
 

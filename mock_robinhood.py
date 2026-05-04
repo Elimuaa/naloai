@@ -36,8 +36,8 @@ async def _fetch_real_price(symbol: str) -> float:
             price = float(r.json()["data"]["amount"])
             _price_cache[symbol] = (price, now)
             return price
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Coinbase price fetch failed for {symbol}: {e}")
 
     # 2. Kraken (fallback)
     try:
@@ -51,8 +51,8 @@ async def _fetch_real_price(symbol: str) -> float:
                 price = float(ticker["c"][0])
                 _price_cache[symbol] = (price, now)
                 return price
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Kraken price fetch failed for {symbol}: {e}")
 
     # 3. CryptoCompare (last resort)
     try:
@@ -62,8 +62,8 @@ async def _fetch_real_price(symbol: str) -> float:
             price = float(r.json()["USD"])
             _price_cache[symbol] = (price, now)
             return price
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"All 3 price sources failed for {symbol} (last: CryptoCompare {e})")
 
     # If all fail, return cached price if available (even if stale)
     if symbol in _price_cache:

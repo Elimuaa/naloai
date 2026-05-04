@@ -27,8 +27,8 @@ def _get_live_demo_balance(user: User) -> float | None:
         )
         if client and hasattr(client, 'balance'):
             return round(client.balance, 2)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"_get_live_demo_balance({user.id}) failed: {e}")
     return None
 
 
@@ -740,3 +740,33 @@ async def optimize_params(
         result = quick_optimize(state.price_history)
 
     return result
+
+
+@router.get("/strategy-memory")
+async def get_strategy_memory(current_user: User = Depends(get_current_user)):
+    """Return the user's permanent strategy memory: knowledge stats + best/worst recipes.
+
+    This is what the system has LEARNED across all this user's trades. Demo and live
+    both feed it (real prices + indicators), so even paper trading produces durable
+    knowledge. Premium users also see the global cross-user memory as a comparison.
+    """
+    from strategy_memory import memory_stats, top_recipes
+    user_stats = await memory_stats(current_user.id)
+    user_recipes = await top_recipes(current_user.id, n=10, min_samples=10)
+
+    payload = {
+        "user": {
+            **user_stats,
+            "best_recipes": user_recipes["best"],
+            "worst_recipes": user_recipes["worst"],
+        }
+    }
+    if getattr(current_user, "is_premium", False):
+        global_stats = await memory_stats(None)
+        global_recipes = await top_recipes(None, n=10, min_samples=20)
+        payload["global"] = {
+            **global_stats,
+            "best_recipes": global_recipes["best"],
+            "worst_recipes": global_recipes["worst"],
+        }
+    return payload

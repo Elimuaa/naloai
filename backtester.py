@@ -291,10 +291,8 @@ def backtest(
             # Time-of-day filter
             if hour_utc in dead_zone:
                 continue
-            # Daily target stop
-            daily_target = max(200.0, state.balance * 0.02)
-            if state.daily_pnl >= daily_target:
-                continue
+            # Daily target tracked for stats only — never caps profit (matches live engine)
+            daily_target = max(200.0, state.balance * 0.025)
             # Z-score
             window = prices[-lookback:]
             mean = statistics.mean(window)

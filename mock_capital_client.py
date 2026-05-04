@@ -58,6 +58,7 @@ class MockCapitalClient:
                 return price
 
         urls = YAHOO_SOURCES.get(sym, [])
+        last_err = None
         for url in urls:
             try:
                 async with httpx.AsyncClient(timeout=8, headers={"User-Agent": "Mozilla/5.0"}) as c:
@@ -66,8 +67,13 @@ class MockCapitalClient:
                     price = float(data["chart"]["result"][0]["meta"]["regularMarketPrice"])
                     self._price_cache[sym] = (price, now)
                     return price
-            except Exception:
+            except Exception as e:
+                last_err = e
+                logger.debug(f"Yahoo price fetch failed for {sym} via {url}: {e}")
                 continue
+
+        if last_err is not None:
+            logger.warning(f"All Yahoo Finance sources failed for {sym} (last: {last_err}); using cached if available")
 
         # Return cached price even if stale
         if sym in self._price_cache:

@@ -9,9 +9,13 @@ venv/
 # Environment
 .env
 
-# Database
+# Database (SQLite WAL/SHM are runtime files — never commit)
 data/*.db
 *.db
+data/*.db-shm
+data/*.db-wal
+*.db-shm
+*.db-wal
 
 # Node
 node_modules/

@@ -133,6 +133,12 @@ class BotState:
         # AI screening
         self.last_ai_screen: Optional[dict] = None
         self.trades_since_optimize: int = 0
+        # Strategy memory — last bucket lookup result, surfaced on dashboard
+        self.last_setup_score: Optional[dict] = None
+        # Signal strength at the moment the trade was opened (0.0–1.0).
+        # Captured here because by the time the trade closes the live `signal_strength`
+        # has long since changed. Required for correct strategy_memory bucketing.
+        self.entry_signal_strength: Optional[float] = None
         # ── Profitability enhancements ──
         self.breakeven_moved: bool = False          # True once SL moved to entry
         self.trade_open_time: Optional[float] = None  # time.time() when trade opened
@@ -170,6 +176,81 @@ _background_tasks: set = set()
 _bot_tasks: dict[str, asyncio.Task] = {}
 _client_cache: dict[str, object] = {}
 _risk_managers: dict[str, RiskManager] = {}
+_risk_state_loaded: set[str] = set()  # user_ids whose risk state has been hydrated from DB
+
+
+async def _load_risk_state(user_id: str, rm: RiskManager) -> None:
+    """One-shot hydrate of RiskManager from the persisted snapshot.
+
+    Called once per process per user. Without this, `daily_pnl`, the Kelly
+    rolling window, and the stop-loss cooldown all reset on every redeploy —
+    which can re-trigger full-size mode after the day's target was already hit
+    or bypass cooldown right after a stop. Both are profitability leaks.
+    """
+    if user_id in _risk_state_loaded:
+        return
+    _risk_state_loaded.add(user_id)
+    try:
+        from database import RiskState
+        async with AsyncSessionLocal() as db:
+            row = (await db.execute(
+                select(RiskState).where(RiskState.user_id == user_id)
+            )).scalar_one_or_none()
+        if row is None:
+            return
+        import json as _json
+        snap = {
+            "daily_pnl": row.daily_pnl,
+            "daily_starting_balance": row.daily_starting_balance,
+            "daily_reset_date": row.daily_reset_date,
+            "is_paused": row.is_paused,
+            "pause_reason": row.pause_reason,
+            "cooldown_remaining": row.cooldown_remaining,
+            "stop_loss_times": _json.loads(row.stop_loss_times_json) if row.stop_loss_times_json else [],
+            "recent_trades": _json.loads(row.recent_trades_json) if row.recent_trades_json else [],
+        }
+        rm.restore_from_dict(snap)
+    except Exception as e:
+        logger.error(f"Risk state load failed for {user_id}: {e}", exc_info=True)
+
+
+async def _persist_risk_state(user_id: str, rm: RiskManager) -> None:
+    """Write the RiskManager snapshot to DB. Called after every trade close."""
+    try:
+        from database import RiskState
+        import json as _json
+        snap = rm.to_persisted_dict()
+        async with AsyncSessionLocal() as db:
+            existing = (await db.execute(
+                select(RiskState).where(RiskState.user_id == user_id)
+            )).scalar_one_or_none()
+            now = datetime.now(timezone.utc)
+            if existing is None:
+                db.add(RiskState(
+                    user_id=user_id,
+                    daily_pnl=snap["daily_pnl"],
+                    daily_starting_balance=snap["daily_starting_balance"],
+                    daily_reset_date=snap["daily_reset_date"],
+                    is_paused=snap["is_paused"],
+                    pause_reason=snap["pause_reason"],
+                    cooldown_remaining=snap["cooldown_remaining"],
+                    stop_loss_times_json=_json.dumps(snap["stop_loss_times"]),
+                    recent_trades_json=_json.dumps(snap["recent_trades"]),
+                    updated_at=now,
+                ))
+            else:
+                existing.daily_pnl = snap["daily_pnl"]
+                existing.daily_starting_balance = snap["daily_starting_balance"]
+                existing.daily_reset_date = snap["daily_reset_date"]
+                existing.is_paused = snap["is_paused"]
+                existing.pause_reason = snap["pause_reason"]
+                existing.cooldown_remaining = snap["cooldown_remaining"]
+                existing.stop_loss_times_json = _json.dumps(snap["stop_loss_times"])
+                existing.recent_trades_json = _json.dumps(snap["recent_trades"])
+                existing.updated_at = now
+            await db.commit()
+    except Exception as e:
+        logger.error(f"Risk state persist failed for {user_id}: {e}", exc_info=True)
 
 
 def _get_risk_manager(user: User) -> RiskManager:
@@ -238,6 +319,7 @@ async def _recover_state_for_symbol(user_id: str, symbol: str, state: 'BotState'
                         "entry_price": ep2,
                         "side": t2.side,
                         "entry_z": 0.0,
+                        "entry_signal_strength": None,  # unknown after restart — recorder uses fallback
                         "quantity": t2.quantity_value or float(t2.quantity),
                         "trail_stop_price": trail2,
                         "trade_open_time": time.time(),
@@ -279,6 +361,12 @@ async def start_bot(user_id: str, force_demo: bool = False):
     else:
         # Gold / NAS100 futures — single asset, no cross-symbol diversification
         symbols_to_run = [primary_symbol]
+
+    # Hydrate the RiskManager from the persisted snapshot ONCE before any loop fires.
+    # This protects daily_pnl, Kelly history, and stop-loss cooldowns across restarts.
+    if user is not None:
+        _rm_for_load = _get_risk_manager(user)
+        await _load_risk_state(user_id, _rm_for_load)
 
     for sym in symbols_to_run:
         _state_key = f"{user_id}:{sym}"
@@ -378,6 +466,7 @@ def get_bot_status(user_id: str) -> dict:
         "risk": risk_mgr.get_status() if risk_mgr else None,
         "open_position_count": open_position_count,
         "active_symbols": list(running_tasks.keys()),
+        "last_setup_score": primary_state.last_setup_score,
     }
 
 
@@ -733,7 +822,13 @@ async def _bot_loop(user_id: str, symbol: str):
             # Initialize risk manager with user settings
             risk_mgr = _get_risk_manager(user)
             balance = client.balance if hasattr(client, 'balance') else (user.demo_balance or 10000.0)
+            _prev_reset_date = risk_mgr.daily_reset_date
             risk_mgr.reset_daily(balance)
+            # If a UTC-day rollover just happened, flush the fresh snapshot to DB so
+            # a restart at 00:01 doesn't show stale yesterday counters in the UI.
+            if risk_mgr.daily_reset_date != _prev_reset_date:
+                _rpr = asyncio.create_task(_persist_risk_state(user_id, risk_mgr))
+                _background_tasks.add(_rpr); _rpr.add_done_callback(_background_tasks.discard)
 
             # symbol is passed as parameter — do not override with user.trading_symbol
             # (allows ETH-USD loop to run alongside BTC-USD loop independently)
@@ -985,6 +1080,9 @@ async def _bot_loop(user_id: str, symbol: str):
                             partial_pnl = partial_diff * half_qty
                             risk_mgr.daily_pnl += partial_pnl   # book the locked profit
                             state.partial_pnl_booked = partial_pnl  # remember for final-close accounting
+                            # Persist updated daily_pnl — partial gains must survive a restart
+                            _rpp = asyncio.create_task(_persist_risk_state(user_id, risk_mgr))
+                            _background_tasks.add(_rpp); _rpp.add_done_callback(_background_tasks.discard)
 
                             # Reduce remaining quantity
                             state.current_quantity = max(
@@ -1169,6 +1267,9 @@ async def _bot_loop(user_id: str, symbol: str):
                     # Update risk manager: daily_pnl gets close-leg only (partial already booked),
                     # but Kelly tracker uses TOTAL to correctly grade the trade.
                     risk_mgr.record_trade_close(close_leg_pnl, exit_reason, total_pnl=pnl)
+                    # Persist the snapshot — survives redeploys (daily_pnl, Kelly, cooldowns)
+                    _rp = asyncio.create_task(_persist_risk_state(user_id, risk_mgr))
+                    _background_tasks.add(_rp); _rp.add_done_callback(_background_tasks.discard)
 
                     # Track consecutive losses/wins and cooldown
                     if pnl < 0:
@@ -1180,7 +1281,7 @@ async def _bot_loop(user_id: str, symbol: str):
                         state.consecutive_losses = 0
                         state.consecutive_wins += 1
 
-                    # Record pattern for AI memory
+                    # Record pattern for AI memory (lightweight per-hour failure tracker)
                     record_pattern(user_id, {
                         "side": state.trade_side,
                         "pnl": pnl,
@@ -1188,6 +1289,58 @@ async def _bot_loop(user_id: str, symbol: str):
                         "z_score": z_score,
                         "regime": state.regime,
                     })
+
+                    # ── PERSISTENT STRATEGY MEMORY ──
+                    # Update aggregated bucket stats — this is the system's permanent
+                    # knowledge base. Demo and live both contribute (real prices, real
+                    # indicators); is_demo is tagged so live can be weighted later.
+                    # Storage is bounded: every trade increments existing buckets.
+                    try:
+                        from strategy_memory import record_strategy_outcome as _rec_strat
+                        _entry_z_for_mem = state.entry_z_score if state.entry_z_score is not None else z_score
+                        # Signal strength is captured at the trade-open moment (0.0-1.0).
+                        # Falling back to the live recompute or last AI confidence (rescaled
+                        # from 0-100 → 0-1) keeps recording even on legacy in-flight trades
+                        # that were opened before this field existed.
+                        if state.entry_signal_strength is not None:
+                            _signal_strength_at_entry = float(state.entry_signal_strength)
+                        else:
+                            _ai_conf_raw = (state.last_ai_screen or {}).get("confidence")
+                            if _ai_conf_raw is not None:
+                                # AI screener returns 0-100; bucketing expects 0-1
+                                _ai_conf = float(_ai_conf_raw)
+                                _signal_strength_at_entry = _ai_conf / 100.0 if _ai_conf > 1.0 else _ai_conf
+                            else:
+                                _signal_strength_at_entry = 0.5
+                            logger.warning(
+                                f"entry_signal_strength missing for {user_id[:8]} {symbol} — "
+                                f"using fallback {_signal_strength_at_entry:.2f}"
+                            )
+                        _duration_min = (
+                            (time.time() - state.trade_open_time) / 60
+                            if state.trade_open_time else 0.0
+                        )
+                        _hour_at_entry = (
+                            datetime.fromtimestamp(state.trade_open_time, tz=timezone.utc).hour
+                            if state.trade_open_time else datetime.now(timezone.utc).hour
+                        )
+                        _mt = asyncio.create_task(_rec_strat(
+                            user_id=user_id,
+                            symbol=symbol,
+                            side=state.trade_side,
+                            hour_utc=_hour_at_entry,
+                            regime=state.regime,
+                            signal_strength=float(_signal_strength_at_entry or 0.5),
+                            z_score=float(_entry_z_for_mem or 0.0),
+                            pnl=float(pnl),
+                            pnl_pct=float(pnl_pct),
+                            duration_minutes=float(_duration_min),
+                            is_demo=bool(is_demo),
+                            exit_reason=str(exit_reason),
+                        ))
+                        _background_tasks.add(_mt); _mt.add_done_callback(_background_tasks.discard)
+                    except Exception as _me:
+                        logger.warning(f"Strategy memory update failed for {user_id}: {_me}")
 
                     # Persist updated demo balance to DB
                     if is_demo and hasattr(client, 'balance'):
@@ -1199,7 +1352,9 @@ async def _bot_loop(user_id: str, symbol: str):
 
                     # Daily target progress — compounds with balance
                     _live_balance = client.balance if is_demo and hasattr(client, 'balance') else balance
-                    _daily_target = max(200.0, _live_balance * 0.02)   # 2% of current balance, min $200
+                    # Daily MINIMUM target: $200 on small accounts, 2.5% on larger → compounds with balance.
+                    # On $10k → $250. On $20k → $500. NOT a cap — bot keeps trading past it for max profit.
+                    _daily_target = max(200.0, _live_balance * 0.025)
                     _daily_pnl = risk_mgr.daily_pnl
                     _progress_pct = min(100.0, max(0.0, (_daily_pnl / _daily_target) * 100)) if _daily_target > 0 else 0.0
 
@@ -1244,6 +1399,7 @@ async def _bot_loop(user_id: str, symbol: str):
                     state.trail_stop_price = None
                     state.current_trade_id = None
                     state.entry_z_score = None
+                    state.entry_signal_strength = None
                     state.breakeven_moved = False
                     state.trade_open_time = None
                     state.partial_exit_done = False
@@ -1337,6 +1493,8 @@ async def _bot_loop(user_id: str, symbol: str):
                         symbol=symbol, quantity=qty2,
                     )
                     risk_mgr.record_trade_close(_pnl2, exit_reason2, total_pnl=_pnl2)
+                    _rp2 = asyncio.create_task(_persist_risk_state(user_id, risk_mgr))
+                    _background_tasks.add(_rp2); _rp2.add_done_callback(_background_tasks.discard)
 
                     if _pnl2 < 0:
                         state.consecutive_losses += 1
@@ -1351,6 +1509,33 @@ async def _bot_loop(user_id: str, symbol: str):
                                 update(User).where(User.id == user_id).values(demo_balance=round(client.balance, 2))
                             )
                             await _db2.commit()
+
+                    # ── Feed the strategy_memory bucket for the second slot too ──
+                    # Without this, ~half of high-confidence trades never enter the
+                    # learning system and the AI calibrator gets a biased sample.
+                    try:
+                        from strategy_memory import record_strategy_outcome as _rec_strat_s2
+                        _s2_dur_min = (
+                            (time.time() - s2["trade_open_time"]) / 60
+                            if s2.get("trade_open_time") else 0.0
+                        )
+                        _s2_hour = (
+                            datetime.fromtimestamp(s2["trade_open_time"], tz=timezone.utc).hour
+                            if s2.get("trade_open_time") else datetime.now(timezone.utc).hour
+                        )
+                        _s2_ss = float(s2.get("entry_signal_strength") or 0.7)
+                        _s2_ez = float(s2.get("entry_z") or z_score)
+                        _t2 = asyncio.create_task(_rec_strat_s2(
+                            user_id=user_id, symbol=symbol, side=side2,
+                            hour_utc=_s2_hour, regime=state.regime,
+                            signal_strength=_s2_ss, z_score=_s2_ez,
+                            pnl=float(_pnl2), pnl_pct=float(_pnl_pct2),
+                            duration_minutes=float(_s2_dur_min),
+                            is_demo=bool(is_demo), exit_reason=str(exit_reason2),
+                        ))
+                        _background_tasks.add(_t2); _t2.add_done_callback(_background_tasks.discard)
+                    except Exception as _se2:
+                        logger.warning(f"Second-slot strategy memory record failed for {user_id}: {_se2}")
 
                     state.second_slot = None
                     logger.info(f"Second slot closed for {user_id}/{symbol}: {exit_reason2} @ {current_price}, P&L ${_pnl2:.2f}")
@@ -1370,14 +1555,13 @@ async def _bot_loop(user_id: str, symbol: str):
             elif not state.in_trade:
                 # ── DAILY PROFIT TARGET STOP: protect locked-in gains ──
                 _cur_bal_entry = client.balance if hasattr(client, 'balance') else balance
-                _daily_tgt_entry = max(200.0, _cur_bal_entry * 0.02)
+                _daily_tgt_entry = max(200.0, _cur_bal_entry * 0.025)
                 _daily_target_hit = risk_mgr.daily_pnl >= _daily_tgt_entry
-                if _daily_target_hit:
-                    state.last_signal = (
-                        f"🎯 Daily target ${_daily_tgt_entry:,.0f} hit "
-                        f"(+${risk_mgr.daily_pnl:,.2f}) — protecting gains until tomorrow"
-                    )
-                    # Bot stays active but won't enter new trades today
+                # NOTE: target hit is NOT a stop — it's a milestone. Bot keeps trading to
+                # maximize daily profit, but later sizing applies a "house-money" ratchet
+                # (smaller positions) so locked gains aren't given back on a single bad trade.
+                if False:
+                    pass
                 else:
                     # Check risk manager
                     can_trade, risk_reason = risk_mgr.can_trade()
@@ -1443,6 +1627,32 @@ async def _bot_loop(user_id: str, symbol: str):
                                     logger.info(f"Quality gate blocked {entry_side} for {user_id}: strength={signal_strength:.2f}")
                                     continue
 
+                                # ── STRATEGY MEMORY GATE — query the system's permanent knowledge ──
+                                # Looks up the historical outcome bucket matching this exact setup
+                                # (symbol/side/hour/regime/strength/z). If the bucket has been seen
+                                # ≥ 10 times with < 35% win rate AND negative avg P&L, BLOCK the trade.
+                                # Demo + live both feed this — every trade makes the system smarter.
+                                # Premium users get cross-user fallback when their personal samples
+                                # are thin → benefit from collective learning faster.
+                                try:
+                                    from strategy_memory import score_setup
+                                    _now_hour = datetime.now(timezone.utc).hour
+                                    _setup = await score_setup(
+                                        user_id=user_id, symbol=symbol, side=entry_side,
+                                        hour_utc=_now_hour, regime=state.regime,
+                                        signal_strength=signal_strength, z_score=z_score,
+                                    )
+                                    state.last_setup_score = _setup
+                                    if _setup["recommendation"] == "skip":
+                                        state.last_signal = f"Strategy memory: {_setup['reason']}"
+                                        logger.info(
+                                            f"Memory-gated entry blocked for {user_id} "
+                                            f"({entry_side}@{symbol}): {_setup['reason']}"
+                                        )
+                                        continue
+                                except Exception as _se:
+                                    logger.debug(f"Strategy memory check skipped: {_se}")
+
                                 # ── PREMIUM ADVANTAGE 2: AI Pre-trade screening ──
                                 ai_approved = True
                                 ai_confidence = 0
@@ -1463,7 +1673,8 @@ async def _bot_loop(user_id: str, symbol: str):
                                         screen_result = await screen_trade(
                                             user_id, entry_side, current_price,
                                             z_score, state.indicators, recent_trades,
-                                            state.regime, signal_strength
+                                            state.regime, signal_strength,
+                                            symbol=symbol,
                                         )
                                         state.last_ai_screen = screen_result
                                         ai_confidence = screen_result.get("confidence", 50)
@@ -1564,6 +1775,36 @@ async def _bot_loop(user_id: str, symbol: str):
                                                     and _short_std / _long_std > 2.0):
                                                 strength_mult *= 0.50
                                                 logger.info(f"Vol-spike guard: short/long σ = {_short_std/_long_std:.2f} → halving size")
+                                        # ── HOUSE-MONEY RATCHET: after daily target is hit, keep trading
+                                        # but with smaller risk so locked-in gains don't bleed out.
+                                        # Profit is NEVER capped — we just press lighter on the gas.
+                                        if _daily_target_hit:
+                                            strength_mult *= 0.65
+                                            logger.info(
+                                                f"House-money ratchet {user_id[:8]}: target +${risk_mgr.daily_pnl:,.0f} "
+                                                f"hit → 0.65× size (still hunting more profit)"
+                                            )
+                                        # ── BUCKET-CONFIDENCE BOOST: concentrate capital on proven winners ──
+                                        # When this exact bucket (symbol+side+hour+regime+strength+z) has a
+                                        # historically high win rate over a meaningful sample, push 1.25× size.
+                                        # When it's historically poor but didn't fully fail the gate, cut to 0.7×.
+                                        try:
+                                            _ss = state.last_setup_score
+                                            if _ss and isinstance(_ss, dict):
+                                                _wr = float(_ss.get("win_rate") or 0.0)
+                                                _n = int(_ss.get("sample_count") or 0)
+                                                if _n >= 20 and _wr >= 0.60:
+                                                    strength_mult = min(3.0, strength_mult * 1.25)
+                                                    logger.info(
+                                                        f"Bucket boost {user_id[:8]}: {_n} samples @ {_wr:.0%} win → 1.25× size"
+                                                    )
+                                                elif _n >= 20 and _wr < 0.45:
+                                                    strength_mult *= 0.70
+                                                    logger.info(
+                                                        f"Bucket caution {user_id[:8]}: {_n} samples @ {_wr:.0%} win → 0.70× size"
+                                                    )
+                                        except Exception as _e:
+                                            logger.debug(f"Bucket-confidence sizing skipped: {_e}")
                                         quantity = round(base_qty * strength_mult, 8)
 
                                     # ── Asset-class quantity rounding ──
@@ -1629,6 +1870,7 @@ async def _bot_loop(user_id: str, symbol: str):
                                     state.entry_price = current_price
                                     state.trade_side = entry_side
                                     state.entry_z_score = z_score
+                                    state.entry_signal_strength = float(signal_strength)
                                     state.current_trade_id = trade_id
                                     state.trade_open_time = time.time()   # ← time-limit tracking
                                     state.breakeven_moved = False          # ← reset for new trade
@@ -1673,10 +1915,10 @@ async def _bot_loop(user_id: str, symbol: str):
             # Requires signal_strength ≥ 0.70 and risk manager not paused.
             elif state.in_trade and state.second_slot is None:
                 _cur_bal_s2 = client.balance if hasattr(client, 'balance') else balance
-                _daily_tgt_s2 = max(200.0, _cur_bal_s2 * 0.02)
-                _s2_daily_ok = risk_mgr.daily_pnl < _daily_tgt_s2
+                _daily_tgt_s2 = max(200.0, _cur_bal_s2 * 0.025)
+                # Always allow second-slot entry — never cap profit. House-money ratchet handles risk.
                 _s2_can_trade, _ = risk_mgr.can_trade()
-                if _s2_daily_ok and _s2_can_trade and (bullish_retest or bearish_retest):
+                if _s2_can_trade and (bullish_retest or bearish_retest):
                     _s2_side = "buy" if bullish_retest else "sell"
                     # Only enter second slot in same direction as primary (don't hedge)
                     if _s2_side == state.trade_side:
@@ -1734,6 +1976,7 @@ async def _bot_loop(user_id: str, symbol: str):
                                         "entry_price": current_price,
                                         "side": _s2_side,
                                         "entry_z": z_score,
+                                        "entry_signal_strength": float(_s2_strength),
                                         "quantity": _s2_qty,
                                         "trail_stop_price": _s2_trail,
                                         "trade_open_time": time.time(),
@@ -1754,7 +1997,7 @@ async def _bot_loop(user_id: str, symbol: str):
 
             # Daily target progress for UI progress bar
             _cur_balance = client.balance if hasattr(client, 'balance') else balance
-            _daily_target_now = max(200.0, _cur_balance * 0.02)  # 2% of current balance
+            _daily_target_now = max(200.0, _cur_balance * 0.025)  # 2.5% of current balance, min $200
             _daily_progress = min(100.0, max(0.0, (risk_mgr.daily_pnl / _daily_target_now) * 100)) if _daily_target_now > 0 else 0.0
 
             # Send status update — hide strategy internals (z_score, indicators) from clients

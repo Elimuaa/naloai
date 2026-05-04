@@ -394,7 +394,7 @@ export function Dashboard() {
           if (typeof d.daily_pnl === 'number') setDailyPnl(d.daily_pnl)
           if (typeof d.daily_target === 'number') setDailyTarget(d.daily_target)
           if (typeof d.daily_progress_pct === 'number') setDailyProgressPct(d.daily_progress_pct)
-          const targetMsg = d.daily_target_hit ? ' 🎯 Daily target hit!' : ` | Day: ${d.daily_progress_pct?.toFixed(0) ?? 0}% of $${d.daily_target?.toFixed(0) ?? 200}`
+          const targetMsg = d.daily_target_hit ? ' 🎯 Daily target hit — still hunting more profit (lighter size)' : ` | Day: ${d.daily_progress_pct?.toFixed(0) ?? 0}% of $${d.daily_target?.toFixed(0) ?? 200}`
           addFeed('trade_closed', `Closed (${d.exit_reason}) P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}${d.demo_mode ? ' [DEMO]' : ''}${targetMsg}`, pnl >= 0 ? 'text-profit' : 'text-loss')
           loadData()
         } else if (d.type === 'ai_analysis_ready') {

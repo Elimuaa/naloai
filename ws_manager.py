@@ -26,13 +26,19 @@ class ConnectionManager:
                 del self._connections[user_id]
 
     async def send_to_user(self, user_id: str, data: dict):
-        if user_id not in self._connections:
+        # Snapshot the connection list — `await ws.send_json` yields to the event loop,
+        # and a concurrent `disconnect()` could mutate the list mid-iteration.
+        sockets = list(self._connections.get(user_id, ()))
+        if not sockets:
             return
         dead = []
-        for ws in self._connections[user_id]:
+        for ws in sockets:
             try:
                 await ws.send_json(data)
-            except Exception:
+            except Exception as e:
+                # Logged at debug — closed sockets during reconnect are normal,
+                # but recurring failures with the same payload type signal a real bug.
+                logger.debug(f"WS send to {user_id[:8]} failed ({data.get('type', '?')}): {e}")
                 dead.append(ws)
         for ws in dead:
             self.disconnect(user_id, ws)

@@ -157,6 +157,78 @@ class DailyReport(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class RiskState(Base):
+    """Per-user risk-manager snapshot — survives process restarts.
+
+    Without this, a redeploy wipes daily_pnl, the Kelly window, and the stop-loss
+    cooldown timeline → the bot may resume in full-size mode after already booking
+    the day's target, or fire fresh entries seconds after a stop-loss because the
+    cooldown is "fresh". Persisting these values protects locked-in profit and the
+    learning system's edge calculations across restarts.
+    """
+    __tablename__ = "risk_state"
+
+    user_id: Mapped[str] = mapped_column(String, primary_key=True)
+    daily_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    daily_starting_balance: Mapped[float] = mapped_column(Float, default=0.0)
+    daily_reset_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # YYYY-MM-DD
+    is_paused: Mapped[bool] = mapped_column(Boolean, default=False)
+    pause_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    cooldown_remaining: Mapped[int] = mapped_column(Integer, default=0)
+    stop_loss_times_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON list of ISO timestamps
+    recent_trades_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)    # JSON list of [pnl, was_win]
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class StrategyMemory(Base):
+    """Aggregated bucket statistics — the system's permanent strategy knowledge base.
+
+    Each row is ONE unique combination of trade conditions (symbol/side/hour/regime/...).
+    Every closed trade increments the matching bucket's counters — we never store
+    individual trades here. Storage is bounded by the number of unique combinations,
+    not by trade volume. A user trading 1,000 trades/day grows this table by at most
+    a few new buckets per day; over time it converges to a fixed size.
+
+    Used by the AI screener to block known-losing setups and by the calibrator to
+    discover which conditions are most profitable. Premium users get cross-user
+    aggregated stats (when user_id is None).
+    """
+    __tablename__ = "strategy_memory"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    # NULL user_id = global aggregation (all users combined) — used for cross-user learning
+    user_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
+
+    # Bucket dimensions — the unique key
+    symbol: Mapped[str] = mapped_column(String, index=True)
+    side: Mapped[str] = mapped_column(String)              # buy / sell
+    hour_utc: Mapped[int] = mapped_column(Integer)         # 0-23
+    regime: Mapped[str] = mapped_column(String)            # ranging/trending_up/trending_down/volatile
+    signal_strength_bucket: Mapped[str] = mapped_column(String)  # "0.0-0.2", "0.2-0.4", ...
+    z_bucket: Mapped[str] = mapped_column(String)          # "1.0-1.5", "1.5-2.0", "2.0-2.5", "2.5+"
+
+    # Aggregated stats — updated incrementally on every trade close
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    win_count: Mapped[int] = mapped_column(Integer, default=0)
+    loss_count: Mapped[int] = mapped_column(Integer, default=0)
+    total_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    total_pnl_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    total_duration_minutes: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # Source split — so live and demo can be weighted separately when needed
+    live_count: Mapped[int] = mapped_column(Integer, default=0)
+    demo_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Exit reason breakdown — reveals whether wins come from TP, trail, or z-revert
+    tp_count: Mapped[int] = mapped_column(Integer, default=0)
+    trail_count: Mapped[int] = mapped_column(Integer, default=0)
+    sl_count: Mapped[int] = mapped_column(Integer, default=0)
+    zrevert_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    last_updated: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class CalibrationLog(Base):
     __tablename__ = "calibration_logs"
 
@@ -217,6 +289,10 @@ async def init_db():
             # Partial profit accounting
             "ALTER TABLE trades ADD COLUMN partial_pnl REAL DEFAULT 0.0",
             "ALTER TABLE trades ADD COLUMN initial_quantity REAL DEFAULT 0",
+            # Strategy memory composite index — speeds up bucket lookups
+            ("CREATE INDEX IF NOT EXISTS ix_strategy_memory_bucket "
+             "ON strategy_memory (symbol, side, hour_utc, regime, signal_strength_bucket, z_bucket, user_id)"),
+            # Risk-state table is created by Base.metadata.create_all; no ALTER needed.
         ]:
             try:
                 await conn.execute(text(stmt))

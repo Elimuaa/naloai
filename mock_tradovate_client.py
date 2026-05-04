@@ -65,6 +65,7 @@ class MockTradovateClient:
             if now - ts < 3:
                 return price
 
+        last_err = None
         for url in YAHOO_SOURCES.get(root, []):
             try:
                 async with httpx.AsyncClient(timeout=8, headers={"User-Agent": "Mozilla/5.0"}) as c:
@@ -73,8 +74,13 @@ class MockTradovateClient:
                     price = float(data["chart"]["result"][0]["meta"]["regularMarketPrice"])
                     self._price_cache[root] = (price, now)
                     return price
-            except Exception:
+            except Exception as e:
+                last_err = e
+                logger.debug(f"Yahoo price fetch failed for {root} via {url}: {e}")
                 continue
+
+        if last_err is not None:
+            logger.warning(f"All Yahoo Finance sources failed for {root} (last: {last_err}); using cached if available")
 
         if root in self._price_cache:
             return self._price_cache[root][0]

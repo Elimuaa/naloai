@@ -14,9 +14,53 @@ logger = logging.getLogger(__name__)
 _regime_cache: dict[str, tuple[str, float]] = {}  # user_id -> (regime, timestamp)
 REGIME_CACHE_TTL = 300  # 5 minutes
 
-# Pattern memory: store failure patterns per user
+# Pattern memory: store failure patterns per user (in-memory + persisted to disk)
 _pattern_memory: dict[str, list[dict]] = {}  # user_id -> list of pattern observations
 MAX_PATTERNS = 50
+_PATTERN_FILE = "data/pattern_memory.json"
+_patterns_loaded = False
+
+
+def _load_patterns():
+    """Load pattern memory from disk on first access (survives restarts/redeploys)."""
+    global _pattern_memory, _patterns_loaded
+    if _patterns_loaded:
+        return
+    _patterns_loaded = True
+    try:
+        os.makedirs("data", exist_ok=True)
+        if os.path.exists(_PATTERN_FILE):
+            with open(_PATTERN_FILE, "r") as f:
+                data = json.load(f)
+            # Validate: must be dict of lists
+            if isinstance(data, dict):
+                _pattern_memory = {k: v for k, v in data.items() if isinstance(v, list)}
+                total = sum(len(v) for v in _pattern_memory.values())
+                logger.info(f"Pattern memory loaded: {len(_pattern_memory)} users, {total} patterns")
+    except Exception as e:
+        logger.warning(f"Pattern memory load failed (starting fresh): {e}")
+
+
+def _save_patterns():
+    """Persist pattern memory to disk after each update.
+
+    Atomic write: serialize to a sibling .tmp file, then os.replace into place.
+    A crash mid-write leaves the original file intact instead of producing an
+    empty/half-written JSON that wipes the user's pattern history on restart.
+    """
+    try:
+        os.makedirs("data", exist_ok=True)
+        tmp_path = _PATTERN_FILE + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(_pattern_memory, f)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp_path, _PATTERN_FILE)
+    except Exception as e:
+        logger.warning(f"Pattern memory save failed: {e}")
 
 
 async def screen_trade(
@@ -28,14 +72,29 @@ async def screen_trade(
     recent_trades: list[dict],
     regime: str,
     signal_strength: float,
+    symbol: str = "BTC-USD",
 ) -> dict:
     """
     Claude pre-trade screening. Asks Claude whether to take the trade.
     Returns: {take: bool, confidence: float, reasoning: str, adjusted_sl: float|None, adjusted_tp: float|None}
     """
+    _load_patterns()
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
         return {"take": True, "confidence": 0.5, "reasoning": "No API key — skipping AI screen"}
+
+    # Derive asset-aware trading hours from broker_base (not hardcoded)
+    from broker_base import get_asset_class, ASSET_CLASS_PRESETS
+    _preset = ASSET_CLASS_PRESETS[get_asset_class(symbol)]
+    _dead_zone = _preset["dead_zone_hours"]
+    hour = datetime.now(timezone.utc).hour
+    if _dead_zone:
+        _trading_hours_note = (
+            f"Dead zone hours (UTC, DO NOT trade): {sorted(_dead_zone)}. "
+            f"Current hour {hour} UTC is {'BLOCKED' if hour in _dead_zone else 'allowed'}."
+        )
+    else:
+        _trading_hours_note = f"{symbol} trades 24/5 — no dead zone hours."
 
     # Build context for Claude
     recent_summary = ""
@@ -48,16 +107,15 @@ async def screen_trade(
     # Check pattern memory for known failure conditions
     patterns = _pattern_memory.get(user_id, [])
     pattern_warnings = []
-    hour = datetime.now(timezone.utc).hour
     for p in patterns[-10:]:
         if p.get("side") == side and p.get("hour") == hour and p.get("outcome") == "loss":
             pattern_warnings.append(f"Historical loss pattern: {side} trades at {hour}:00 UTC tend to lose")
 
     ind_str = ", ".join(f"{k}={v}" for k, v in indicators.items() if isinstance(v, (int, float)))
 
-    prompt = f"""You are a crypto trading advisor. Evaluate this trade signal and respond with JSON only.
+    prompt = f"""You are a trading advisor. Evaluate this trade signal and respond with JSON only.
 
-Signal: {side.upper()} BTC at ${current_price:,.2f}
+Signal: {side.upper()} {symbol} at ${current_price:,.2f}
 Z-score: {z_score:.3f}
 Signal strength: {signal_strength:.0%}
 Market regime: {regime}
@@ -65,12 +123,13 @@ Indicators: {ind_str}
 {recent_summary}
 {chr(10).join(pattern_warnings) if pattern_warnings else 'No pattern warnings.'}
 Current hour (UTC): {hour}
+{_trading_hours_note}
 
 Rules:
 - In "ranging" regime, mean-reversion trades are good
 - In "trending" regime, mean-reversion is dangerous — only take if signal strength > 80%
 - After 3+ consecutive losses, be more conservative
-- Avoid trades during 4-8 AM UTC (low volume)
+- If the current hour is in the dead zone, set take=false
 - If indicators conflict with the signal, reduce confidence
 
 Respond with ONLY this JSON:
@@ -202,7 +261,8 @@ Answer:"""
 
 
 def record_pattern(user_id: str, trade_data: dict):
-    """Record a trade pattern for Claude's pattern memory."""
+    """Record a trade pattern for Claude's pattern memory (persisted across restarts)."""
+    _load_patterns()
     if user_id not in _pattern_memory:
         _pattern_memory[user_id] = []
 
@@ -219,10 +279,12 @@ def record_pattern(user_id: str, trade_data: dict):
     _pattern_memory[user_id].append(pattern)
     if len(_pattern_memory[user_id]) > MAX_PATTERNS:
         _pattern_memory[user_id] = _pattern_memory[user_id][-MAX_PATTERNS:]
+    _save_patterns()
 
 
 def get_pattern_insights(user_id: str) -> dict:
     """Analyze stored patterns and return actionable insights."""
+    _load_patterns()
     patterns = _pattern_memory.get(user_id, [])
     if len(patterns) < 10:
         return {"sufficient_data": False}

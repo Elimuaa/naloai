@@ -192,6 +192,57 @@ class RiskManager:
         qty = max(min_qty, round(qty, 4))
         return qty
 
+    def to_persisted_dict(self) -> dict:
+        """Serialize the volatile state required to survive a process restart.
+
+        Static config (max_drawdown_pct etc) is reloaded from the User row each
+        tick via _get_risk_manager — only the LIVE counters need persisting.
+        """
+        return {
+            "daily_pnl": float(self.daily_pnl),
+            "daily_starting_balance": float(self.daily_starting_balance),
+            "daily_reset_date": self.daily_reset_date,
+            "is_paused": bool(self.is_paused),
+            "pause_reason": self.pause_reason or "",
+            "cooldown_remaining": int(self.cooldown_remaining),
+            "stop_loss_times": [t.isoformat() for t in self.stop_loss_times],
+            "recent_trades": [[float(p), bool(w)] for (p, w) in self.recent_trades],
+        }
+
+    def restore_from_dict(self, data: dict) -> None:
+        """Hydrate state from a persisted snapshot. Tolerant of partial/missing fields."""
+        try:
+            self.daily_pnl = float(data.get("daily_pnl") or 0.0)
+            self.daily_starting_balance = float(data.get("daily_starting_balance") or 0.0)
+            self.daily_reset_date = data.get("daily_reset_date")
+            self.is_paused = bool(data.get("is_paused") or False)
+            self.pause_reason = data.get("pause_reason") or ""
+            self.cooldown_remaining = int(data.get("cooldown_remaining") or 0)
+            slt = data.get("stop_loss_times") or []
+            self.stop_loss_times = []
+            for s in slt:
+                try:
+                    self.stop_loss_times.append(datetime.fromisoformat(s))
+                except Exception:
+                    continue
+            rt = data.get("recent_trades") or []
+            self.recent_trades = []
+            for entry in rt:
+                try:
+                    self.recent_trades.append((float(entry[0]), bool(entry[1])))
+                except Exception:
+                    continue
+            # If the persisted day is yesterday, the next tick's reset_daily() will
+            # roll the counters cleanly. We still keep the values here so the UI
+            # doesn't flash zeros for the brief window before the first tick.
+            logger.info(
+                f"Risk state restored: daily_pnl={self.daily_pnl:.2f}, "
+                f"recent_trades={len(self.recent_trades)}, stops={len(self.stop_loss_times)}, "
+                f"paused={self.is_paused}"
+            )
+        except Exception as e:
+            logger.error(f"Risk state restore failed (starting fresh): {e}")
+
     def get_status(self) -> dict:
         """Return current risk manager state for UI display."""
         return {
