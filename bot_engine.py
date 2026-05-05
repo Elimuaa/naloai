@@ -2155,7 +2155,7 @@ async def _bot_loop(user_id: str, symbol: str):
 
             state.error_count += 1
             await ws_manager.send_to_user(user_id, {"type": "bot_error", "message": err_str})
-            if state.error_count > 10:
+            if state.error_count >= 10:
                 # Auto-restart after a back-off pause instead of dying permanently.
                 # A dead loop leaves open positions unmanaged (no stop-loss checks).
                 # Reset error count, sleep 120s, then resume — covers transient API blips.

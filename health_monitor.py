@@ -39,11 +39,12 @@ async def check_bot_loops() -> dict:
         uid = user.id
         active_count += 1
 
-        # Keys are now f"{user_id}:{symbol}" — check any loop for this user is alive
+        # Check each per-symbol task individually — a user may have BTC alive but ETH dead
         user_tasks = {k: t for k, t in _bot_tasks.items() if k.startswith(f"{uid}:")}
-        running = any(not t.done() for t in user_tasks.values())
+        any_running = any(not t.done() for t in user_tasks.values())
 
-        if not running:
+        if not user_tasks or not any_running:
+            # All loops dead — restart the whole user bot
             issues.append(f"Bot task missing/dead for user {uid[:8]}. Attempting restart...")
             try:
                 from bot_engine import start_bot
@@ -53,9 +54,29 @@ async def check_bot_loops() -> dict:
                 issues[-1] += f" RESTART FAILED: {e}"
             continue
 
-        # Check if any symbol state is being updated (not stuck)
+        # Check each symbol loop individually — restart dead per-symbol loops
         user_states = {k: v for k, v in bot_states.items() if k.startswith(f"{uid}:")}
         for state_key, state in user_states.items():
+            sym = state_key.split(":")[-1]
+            task = user_tasks.get(state_key)
+
+            # Dead per-symbol loop while other symbols still run → restart just this loop
+            if task is not None and task.done():
+                issues.append(f"Bot loop dead for {uid[:8]} ({sym}). Restarting symbol...")
+                try:
+                    from bot_engine import _bot_loop, _get_client
+                    import asyncio as _aio
+                    new_task = _aio.create_task(
+                        _bot_loop(uid, sym), name=f"bot-{uid}-{sym}"
+                    )
+                    _bot_tasks[state_key] = new_task
+                    if state:
+                        state.error_count = 0
+                    issues[-1] += " RESTARTED OK"
+                except Exception as e:
+                    issues[-1] += f" RESTART FAILED: {e}"
+                continue
+
             if state and state.last_update:
                 try:
                     last = datetime.fromisoformat(state.last_update)
@@ -63,7 +84,6 @@ async def check_bot_loops() -> dict:
                     max_age = 5 if not state.demo_mode else 10
                     if age_minutes > max_age:
                         stuck_count += 1
-                        sym = state_key.split(":")[-1]
                         issues.append(
                             f"Bot for {uid[:8]} ({sym}) may be stuck — last update {age_minutes:.0f}m ago"
                         )
@@ -72,7 +92,6 @@ async def check_bot_loops() -> dict:
 
             # Check for excessive errors
             if state and state.error_count > 5:
-                sym = state_key.split(":")[-1]
                 issues.append(f"Bot for {uid[:8]} ({sym}) has {state.error_count} errors")
 
     return {
