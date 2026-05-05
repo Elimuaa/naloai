@@ -1881,6 +1881,20 @@ async def _bot_loop(user_id: str, symbol: str):
                                             logger.debug(f"Bucket-confidence sizing skipped: {_e}")
                                         quantity = round(base_qty * strength_mult, 8)
 
+                                        # ── HARD EXPOSURE CAP (post-multiplier) ──
+                                        # strength_mult × Kelly can exceed the exposure cap set in
+                                        # calculate_position_size. Enforce it absolutely here so no
+                                        # combination of multipliers can bust the user's risk limit.
+                                        if balance > 0 and current_price > 0:
+                                            _abs_max = (balance * (risk_mgr.max_exposure_pct / 100.0)) / current_price
+                                            if quantity > _abs_max:
+                                                logger.info(
+                                                    f"Exposure cap enforced for {user_id[:8]}/{symbol}: "
+                                                    f"{quantity:.4f} → {_abs_max:.4f} "
+                                                    f"(multipliers exceeded {risk_mgr.max_exposure_pct:.0f}% limit)"
+                                                )
+                                                quantity = _abs_max
+
                                     # ── Asset-class quantity rounding ──
                                     from broker_base import get_asset_class, ASSET_CLASS_PRESETS as _QP
                                     _preset = _QP[get_asset_class(symbol)]
