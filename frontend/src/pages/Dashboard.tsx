@@ -944,10 +944,31 @@ export function Dashboard() {
                 <div className="mt-4 pt-4 border-t border-border">
                   <p className="text-xs font-semibold text-muted mb-2 uppercase tracking-wider">{isDemo ? 'Demo Balance' : 'Live Balance'}</p>
                   {isDemo ? (
-                    <div className="p-3 rounded-xl bg-elevated mb-2">
-                      <p className="text-xs text-muted mb-1">Paper Trading Balance</p>
-                      <p className="text-xl font-bold font-mono text-warning">${(liveDemoBalance ?? settings?.demo_balance ?? 10000).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                    </div>
+                    (() => {
+                      const cash = liveDemoBalance ?? settings?.demo_balance ?? 10000
+                      const openPositionCost = trades
+                        .filter(t => t.state === 'open' && t.is_demo)
+                        .reduce((sum, t) => sum + (parseFloat(t.entry_price ?? '0') * parseFloat(t.quantity)), 0)
+                      const totalPortfolio = cash + openPositionCost
+                      return (
+                        <div className="space-y-2 mb-2">
+                          <div className="p-3 rounded-xl bg-elevated">
+                            <p className="text-xs text-muted mb-1">Total Portfolio Value</p>
+                            <p className="text-xl font-bold font-mono text-profit">${totalPortfolio.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                          </div>
+                          <div className="flex gap-2">
+                            <div className="flex-1 p-2.5 rounded-xl bg-elevated">
+                              <p className="text-xs text-muted mb-0.5">Available Cash</p>
+                              <p className="text-sm font-bold font-mono text-warning">${cash.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                            </div>
+                            <div className="flex-1 p-2.5 rounded-xl bg-elevated">
+                              <p className="text-xs text-muted mb-0.5">In Positions</p>
+                              <p className="text-sm font-bold font-mono text-accent">${openPositionCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })()
                   ) : balance && !balance.error ? (
                     <>
                       {balance.available !== null && (
