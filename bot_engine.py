@@ -422,6 +422,137 @@ async def start_bot(user_id: str, force_demo: bool = False):
     return {"status": "started", "symbols": symbols_to_run}
 
 
+async def graceful_shutdown_close_all_demo_positions():
+    """Close every open demo position before the process exits.
+
+    Render sends SIGTERM ~30s before SIGKILL on deploy. Without this, the
+    bot loops are simply cancelled mid-trade — leaving open positions that
+    accrue unrealised P&L (sometimes large losses) during the 5–7 min
+    redeploy window. This sells everything at market on the way out so
+    every restart begins flat with cash-only exposure.
+
+    Live (Robinhood/Capital/Tradovate) positions are NOT closed — those
+    represent real money and the user owns the decision. Only demo loops
+    where state.demo_mode is True are flushed.
+    """
+    logger.info("Graceful shutdown: closing all open demo positions before exit...")
+    closed_count = 0
+    failed_count = 0
+
+    # Snapshot keys — bot_states may mutate while we iterate
+    state_keys = list(bot_states.keys())
+
+    for skey in state_keys:
+        try:
+            user_id, symbol = skey.split(":", 1)
+        except ValueError:
+            continue
+        state = bot_states.get(skey)
+        if not state or not state.demo_mode:
+            continue
+        if not state.in_trade or not state.current_trade_id or state.current_quantity <= 0:
+            continue
+
+        try:
+            # Look up the user once to get a client
+            async with AsyncSessionLocal() as db:
+                user = (await db.execute(
+                    select(User).where(User.id == user_id)
+                )).scalar_one_or_none()
+            if user is None:
+                continue
+            client = _get_client(user, force_demo=True)
+
+            # Best-effort current price for the close fill
+            try:
+                exit_price = await asyncio.wait_for(
+                    client.get_current_price(symbol), timeout=4.0
+                )
+            except Exception:
+                exit_price = state.entry_price or 0.0
+            if not exit_price or exit_price <= 0:
+                exit_price = state.entry_price or 0.0
+
+            # Place sell at market for the full remaining qty (mock client trusts qty)
+            sell_side = "sell" if state.trade_side == "buy" else "buy"
+            try:
+                await asyncio.wait_for(
+                    client.place_market_order(symbol, sell_side, str(state.current_quantity)),
+                    timeout=5.0,
+                )
+            except Exception as _oe:
+                logger.warning(f"graceful shutdown: market order failed for {skey}: {_oe}")
+
+            # Persist the close to DB so the next process boot sees a flat book
+            await _close_trade(
+                user_id=user_id,
+                trade_id=state.current_trade_id,
+                exit_price=float(exit_price),
+                exit_reason="graceful_shutdown",
+                entry_price=float(state.entry_price or exit_price),
+                side=state.trade_side or "buy",
+                entry_z=float(getattr(state, "entry_z_score", 0.0) or 0.0),
+                current_z=0.0,
+                symbol=symbol,
+                quantity=float(state.current_quantity),
+                partial_pnl=float(getattr(state, "partial_pnl_booked", 0.0) or 0.0),
+            )
+
+            # Also close the second slot if present
+            if state.second_slot and state.second_slot.get("trade_id"):
+                try:
+                    s2 = state.second_slot
+                    s2_qty = float(s2.get("quantity", 0))
+                    if s2_qty > 0:
+                        try:
+                            await asyncio.wait_for(
+                                client.place_market_order(symbol, sell_side, str(s2_qty)),
+                                timeout=5.0,
+                            )
+                        except Exception:
+                            pass
+                        await _close_trade(
+                            user_id=user_id,
+                            trade_id=s2["trade_id"],
+                            exit_price=float(exit_price),
+                            exit_reason="graceful_shutdown",
+                            entry_price=float(s2.get("entry_price") or exit_price),
+                            side=s2.get("side") or state.trade_side or "buy",
+                            entry_z=float(s2.get("entry_z_score") or 0.0),
+                            current_z=0.0,
+                            symbol=symbol,
+                            quantity=s2_qty,
+                            partial_pnl=0.0,
+                        )
+                except Exception as _e2:
+                    logger.warning(f"graceful shutdown: second-slot close failed for {skey}: {_e2}")
+
+            # Persist the new demo balance after the sell
+            try:
+                if hasattr(client, "balance"):
+                    async with AsyncSessionLocal() as db:
+                        await db.execute(
+                            update(User).where(User.id == user_id).values(
+                                demo_balance=round(client.balance, 2)
+                            )
+                        )
+                        await db.commit()
+            except Exception:
+                pass
+
+            closed_count += 1
+            logger.info(f"Graceful shutdown: closed {skey} @ {exit_price}")
+        except Exception as e:
+            failed_count += 1
+            logger.error(f"Graceful shutdown: failed to close {skey}: {e}", exc_info=True)
+
+    logger.info(
+        f"Graceful shutdown complete: closed {closed_count} demo positions "
+        f"({failed_count} failed)"
+    )
+    return {"closed": closed_count, "failed": failed_count}
+
+
 async def stop_bot(user_id: str):
     # Persist demo balance before clearing client cache
     for k in list(_client_cache.keys()):

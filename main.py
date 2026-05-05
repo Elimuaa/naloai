@@ -12,7 +12,7 @@ from database import init_db, AsyncSessionLocal, User
 from sqlalchemy import select
 from auth import get_current_user_ws
 from ws_manager import ws_manager
-from bot_engine import start_bot, _bot_tasks
+from bot_engine import start_bot, _bot_tasks, graceful_shutdown_close_all_demo_positions
 from scheduler import start_scheduler
 from routers import auth_router, bot_router, trades_router, reports_router, market_router, admin_router, stripe_router
 from health_monitor import run_full_health_check, get_health_history
@@ -84,7 +84,21 @@ async def lifespan(app: FastAPI):
             logger.info(f"Restoring bot for user {user.id}")
             await start_bot(user.id)
     yield
-    # Shutdown all bots
+    # ── Graceful shutdown: close all open demo positions before cancelling ───
+    # Render gives ~30s on SIGTERM before SIGKILL. Without this, deploy windows
+    # leave demo positions exposed for 5–7 min unmanaged → stop-loss/time-cap
+    # fires on resume against a stale price → preventable losses.
+    try:
+        await asyncio.wait_for(
+            graceful_shutdown_close_all_demo_positions(),
+            timeout=20.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Graceful shutdown timed out at 20s — proceeding to cancel tasks")
+    except Exception as _e:
+        logger.error(f"Graceful shutdown errored: {_e}", exc_info=True)
+
+    # Cancel bot tasks now that positions are flushed
     for task in _bot_tasks.values():
         task.cancel()
 
