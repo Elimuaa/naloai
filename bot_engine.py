@@ -394,6 +394,27 @@ async def start_bot(user_id: str, force_demo: bool = False):
         state = BotState(force_demo=force_demo)
         await _recover_state_for_symbol(user_id, sym, state)
         bot_states[_state_key] = state
+
+        # Rebuild mock client holdings from restored open trades so that sell orders
+        # on exit correctly credit the balance (mock client._holdings is in-memory only
+        # and is wiped on every process restart — without this, exit sells execute for
+        # qty=0 and the position value silently disappears from the demo balance).
+        if state.in_trade and state.current_quantity > 0:
+            client_now = _get_client(user, force_demo=force_demo)
+            if hasattr(client_now, '_holdings'):
+                current_held = client_now._holdings.get(sym, 0)
+                client_now._holdings[sym] = current_held + state.current_quantity
+                logger.info(
+                    f"Restored holdings for {user_id}/{sym}: +{state.current_quantity} "
+                    f"(total held: {client_now._holdings[sym]:.6f})"
+                )
+        if state.second_slot and state.second_slot.get("quantity", 0) > 0:
+            client_now = _get_client(user, force_demo=force_demo)
+            if hasattr(client_now, '_holdings'):
+                s2_qty = state.second_slot["quantity"]
+                client_now._holdings[sym] = client_now._holdings.get(sym, 0) + s2_qty
+                logger.info(f"Restored second-slot holdings for {user_id}/{sym}: +{s2_qty:.6f}")
+
         task = asyncio.create_task(_bot_loop(user_id, sym), name=f"bot-{user_id}-{sym}")
         _bot_tasks[_state_key] = task
         logger.info(f"Launched bot loop for {user_id} symbol={sym}")

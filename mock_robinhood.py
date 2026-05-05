@@ -146,13 +146,16 @@ class MockRobinhoodClient:
                 self._holdings[symbol] = self._holdings.get(symbol, 0) + qty
             else:
                 held = self._holdings.get(symbol, 0)
-                if qty > held:
-                    qty = held  # Can only sell what we hold
-                notional = fill_price * qty
+                # If held=0 but qty>0, the position was restored from DB after a
+                # process restart — _holdings is in-memory only and wasn't rebuilt.
+                # BotState has the authoritative quantity; trust it and credit the
+                # full proceeds so the balance isn't silently destroyed on every deploy.
+                sell_qty = qty if held == 0 and qty > 0 else min(qty, held)
+                notional = fill_price * sell_qty
                 fee = notional * FEE_PCT
                 proceeds = notional - fee
                 self.balance += proceeds
-                self._holdings[symbol] = max(0, held - qty)
+                self._holdings[symbol] = max(0, held - sell_qty)
 
         logger.info(
             f"Mock order: {side} {asset_quantity} {symbol} @ ${fill_price:,.2f} "
