@@ -310,8 +310,18 @@ async def _recover_state_for_symbol(user_id: str, symbol: str, state: 'BotState'
                     state.trade_side = t.side
                     state.current_trade_id = t.id
                     state.current_quantity = t.quantity_value or float(t.quantity)
-                    ep = state.entry_price
-                    state.trail_stop_price = ep * (1 - trail_pct) if t.side == "buy" else ep * (1 + trail_pct)
+                    # Trail starts None — arms at +0.5R same as fresh entry (consistent with 07d339f)
+                    state.trail_stop_price = None
+                    # Restore trade_open_time from DB so the 5h time-cap still fires after restarts.
+                    # Without this, trade_open_time stays None → time-cap never fires → trades
+                    # can stay open indefinitely if price drifts between SL and TP.
+                    if t.opened_at:
+                        _oa = t.opened_at
+                        if _oa.tzinfo is None:
+                            _oa = _oa.replace(tzinfo=timezone.utc)
+                        state.trade_open_time = _oa.timestamp()
+                    else:
+                        state.trade_open_time = time.time() - 3600  # assume 1h old if no timestamp
                     logger.info(f"Restored primary trade {t.id[:8]} for {user_id}/{symbol}: {t.side} @ {t.entry_price}")
 
             if len(open_trades) >= 2:
@@ -319,7 +329,9 @@ async def _recover_state_for_symbol(user_id: str, symbol: str, state: 'BotState'
                 t2 = open_trades[1]
                 if t2.entry_price:
                     ep2 = float(t2.entry_price)
-                    trail2 = ep2 * (1 - trail_pct) if t2.side == "buy" else ep2 * (1 + trail_pct)
+                    _oa2 = t2.opened_at
+                    if _oa2 and _oa2.tzinfo is None:
+                        _oa2 = _oa2.replace(tzinfo=timezone.utc)
                     state.second_slot = {
                         "trade_id": t2.id,
                         "entry_price": ep2,
@@ -327,8 +339,8 @@ async def _recover_state_for_symbol(user_id: str, symbol: str, state: 'BotState'
                         "entry_z": 0.0,
                         "entry_signal_strength": None,  # unknown after restart — recorder uses fallback
                         "quantity": t2.quantity_value or float(t2.quantity),
-                        "trail_stop_price": trail2,
-                        "trade_open_time": time.time(),
+                        "trail_stop_price": None,  # arms at +0.5R, consistent with 07d339f
+                        "trade_open_time": _oa2.timestamp() if _oa2 else time.time() - 3600,
                         "adaptive_tp_pct": None,
                         "breakeven_moved": False,
                     }
@@ -2109,11 +2121,19 @@ async def _bot_loop(user_id: str, symbol: str):
             state.error_count += 1
             await ws_manager.send_to_user(user_id, {"type": "bot_error", "message": err_str})
             if state.error_count > 10:
+                # Auto-restart after a back-off pause instead of dying permanently.
+                # A dead loop leaves open positions unmanaged (no stop-loss checks).
+                # Reset error count, sleep 120s, then resume — covers transient API blips.
+                logger.warning(
+                    f"Bot for {user_id}/{symbol}: {state.error_count} errors, pausing 120s then auto-restarting"
+                )
                 await ws_manager.send_to_user(user_id, {
                     "type": "bot_error",
-                    "message": "Bot stopped after too many errors. Check your settings and restart.",
+                    "message": f"Too many errors on {symbol}. Auto-restarting in 2 minutes...",
                 })
-                break
+                state.error_count = 0
+                await asyncio.sleep(120)
+                continue
 
         await asyncio.sleep(POLL_INTERVAL)
 
