@@ -186,6 +186,53 @@ async def lifespan(app: FastAPI):
             await db.commit()
             logger.warning(f"Reset {reset_all.rowcount} users to $10,000 demo balance (clean slate)")
 
+        # 6) Scrub absurd trade quantities. The bug stamped quintillion-coin
+        #    quantities into Trade.quantity / quantity_value. Display rows
+        #    showing "86,589,892,941,003,653,120 DOGE" are confusing even
+        #    though P&L was zeroed. Any trade whose notional (qty * entry)
+        #    exceeds $1M is corrupt for our $10k demo accounts — flag it and
+        #    zero the quantity so trade history reads sanely.
+        from sqlalchemy import cast as __cast, Float as __Float
+        # quantity is stored as a string; quantity_value is the numeric mirror.
+        # Use quantity_value where available; fall back to cast on quantity.
+        ABSURD_QTY_NOTIONAL = 1_000_000.0  # $1M position is impossible from $10k
+        # Fetch candidate rows to evaluate notional in Python (entry_price is also string).
+        cand_q = await db.execute(
+            select(_Trade).where(_Trade.quantity_value > 100.0)  # cheap pre-filter
+        )
+        candidates = cand_q.scalars().all()
+        scrub_ids: list[str] = []
+        for tr in candidates:
+            try:
+                ep = float(tr.entry_price) if tr.entry_price else 0.0
+                qv = float(tr.quantity_value or 0.0)
+                if ep > 0 and qv > 0 and (ep * qv) > ABSURD_QTY_NOTIONAL:
+                    scrub_ids.append(tr.id)
+            except (ValueError, TypeError):
+                continue
+        if scrub_ids:
+            # Update in chunks to avoid oversized IN clauses.
+            CHUNK = 500
+            total = 0
+            for i in range(0, len(scrub_ids), CHUNK):
+                chunk = scrub_ids[i:i+CHUNK]
+                res = await db.execute(
+                    _Trade.__table__.update()
+                    .where(_Trade.id.in_(chunk))
+                    .values(
+                        quantity="0",
+                        quantity_value=0.0,
+                        initial_quantity=0.0,
+                        exit_reason="data_corruption_scrubbed",
+                    )
+                )
+                total += res.rowcount or 0
+            await db.commit()
+            logger.warning(
+                f"Scrubbed {total} corrupted trade rows: zeroed quantity where "
+                f"notional > ${ABSURD_QTY_NOTIONAL:,.0f}"
+            )
+
     # Restore previously active bots
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(User).where(User.bot_active == True))
