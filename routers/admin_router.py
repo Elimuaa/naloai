@@ -301,6 +301,29 @@ async def admin_today_stats(
     }
 
 
+@router.post("/users/{user_id}/start-bot")
+async def admin_start_user_bot(
+    user_id: str,
+    admin: User = Depends(verify_admin_jwt),
+    db: AsyncSession = Depends(get_db)
+):
+    """Admin: start the demo bot for any user. Used to resume users whose bots
+    were deactivated by the corruption recovery migration."""
+    from bot_engine import start_bot
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(404, "User not found")
+    await db.execute(update(User).where(User.id == user_id).values(bot_active=True))
+    await db.commit()
+    try:
+        await start_bot(user_id)
+    except Exception as e:
+        logger.error(f"admin start_bot({user_id}) failed: {e}")
+        raise HTTPException(500, f"start_bot failed: {e}")
+    return {"user_id": user_id, "bot_active": True}
+
+
 @router.post("/users/{user_id}/premium")
 async def admin_toggle_premium(
     user_id: str,
