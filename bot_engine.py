@@ -395,25 +395,35 @@ async def start_bot(user_id: str, force_demo: bool = False):
         await _recover_state_for_symbol(user_id, sym, state)
         bot_states[_state_key] = state
 
-        # Rebuild mock client holdings from restored open trades so that sell orders
-        # on exit correctly credit the balance (mock client._holdings is in-memory only
-        # and is wiped on every process restart — without this, exit sells execute for
-        # qty=0 and the position value silently disappears from the demo balance).
+        # Rebuild mock client holdings from restored open trades so that exit orders
+        # on close correctly compute P&L (mock client._holdings is in-memory only
+        # and is wiped on every process restart). Sign matters: a long is +qty and
+        # a short is -qty. Without the sign, restoring a short as +qty and then
+        # buying-to-close double-counts proceeds and corrupts the demo balance.
         if state.in_trade and state.current_quantity > 0:
             client_now = _get_client(user, force_demo=force_demo)
             if hasattr(client_now, '_holdings'):
+                sign = 1.0 if (state.trade_side or "buy") == "buy" else -1.0
                 current_held = client_now._holdings.get(sym, 0)
-                client_now._holdings[sym] = current_held + state.current_quantity
+                client_now._holdings[sym] = current_held + sign * state.current_quantity
+                if hasattr(client_now, '_avg_entry') and state.entry_price:
+                    client_now._avg_entry[sym] = float(state.entry_price)
                 logger.info(
-                    f"Restored holdings for {user_id}/{sym}: +{state.current_quantity} "
-                    f"(total held: {client_now._holdings[sym]:.6f})"
+                    f"Restored holdings for {user_id}/{sym}: {sign:+.0f}*{state.current_quantity} "
+                    f"(total held: {client_now._holdings[sym]:.6f}, side={state.trade_side})"
                 )
         if state.second_slot and state.second_slot.get("quantity", 0) > 0:
             client_now = _get_client(user, force_demo=force_demo)
             if hasattr(client_now, '_holdings'):
-                s2_qty = state.second_slot["quantity"]
-                client_now._holdings[sym] = client_now._holdings.get(sym, 0) + s2_qty
-                logger.info(f"Restored second-slot holdings for {user_id}/{sym}: +{s2_qty:.6f}")
+                s2 = state.second_slot
+                s2_qty = s2.get("quantity", 0)
+                s2_side = s2.get("side") or state.trade_side or "buy"
+                sign = 1.0 if s2_side == "buy" else -1.0
+                client_now._holdings[sym] = client_now._holdings.get(sym, 0) + sign * s2_qty
+                if hasattr(client_now, '_avg_entry') and s2.get("entry_price"):
+                    # Don't overwrite primary basis if already set; only set if missing.
+                    client_now._avg_entry.setdefault(sym, float(s2["entry_price"]))
+                logger.info(f"Restored second-slot holdings for {user_id}/{sym}: {sign:+.0f}*{s2_qty:.6f} (side={s2_side})")
 
         task = asyncio.create_task(_bot_loop(user_id, sym), name=f"bot-{user_id}-{sym}")
         _bot_tasks[_state_key] = task

@@ -80,7 +80,15 @@ class MockRobinhoodClient:
     def __init__(self, symbol: str = "BTC-USD", balance: float = 10000.0):
         self.symbol = symbol
         self.balance = balance
-        self._holdings: dict[str, float] = {}  # symbol -> quantity
+        # Signed quantity: positive = long, negative = short. Tracking shorts as
+        # negative is what keeps balance honest when the strategy opens a sell-side
+        # position — without this, sell-to-open silently credits proceeds and the
+        # balance grows unboundedly on every short cycle.
+        self._holdings: dict[str, float] = {}
+        # Average entry price per open position. Required so that closing a short
+        # can compute realized P&L = (entry - fill) * qty without needing a prior
+        # cash debit. Pop on flat.
+        self._avg_entry: dict[str, float] = {}
         self._lock = asyncio.Lock()  # prevents concurrent balance mutations across 4 symbol loops
         logger.info(f"MockRobinhoodClient initialized — demo balance: ${balance:,.2f} (using real market prices)")
 
@@ -88,6 +96,9 @@ class MockRobinhoodClient:
         return {"buying_power": str(round(self.balance, 4)), "buying_power_currency": "USD"}
 
     async def get_holdings(self) -> dict:
+        # Only surface long positions to the existing get_holdings consumers
+        # (display in dashboard) — shorts are tracked internally but not shown
+        # as "holdings" since they're synthetic, not custodied assets.
         results = []
         for sym, qty in self._holdings.items():
             if qty > 0:
@@ -135,27 +146,89 @@ class MockRobinhoodClient:
         # Lock prevents two concurrent loops (e.g. BTC + ETH) both passing the balance
         # check before either deducts, which could overdraw the account silently.
         async with self._lock:
+            held = self._holdings.get(symbol, 0.0)
+            basis = self._avg_entry.get(symbol, 0.0)
+            notional = fill_price * qty
+            fee = notional * FEE_PCT
+
             if side == "buy":
-                notional = fill_price * qty
-                fee = notional * FEE_PCT
-                cost = notional + fee
-                if cost > self.balance:
-                    logger.warning(f"Insufficient demo balance: need ${cost:,.2f}, have ${self.balance:,.2f}")
-                    return {"id": order_id, "state": "rejected", "reason": "insufficient_balance"}
-                self.balance -= cost
-                self._holdings[symbol] = self._holdings.get(symbol, 0) + qty
-            else:
-                held = self._holdings.get(symbol, 0)
-                # If held=0 but qty>0, the position was restored from DB after a
-                # process restart — _holdings is in-memory only and wasn't rebuilt.
-                # BotState has the authoritative quantity; trust it and credit the
-                # full proceeds so the balance isn't silently destroyed on every deploy.
-                sell_qty = qty if held == 0 and qty > 0 else min(qty, held)
-                notional = fill_price * sell_qty
-                fee = notional * FEE_PCT
-                proceeds = notional - fee
-                self.balance += proceeds
-                self._holdings[symbol] = max(0, held - sell_qty)
+                if held < 0:
+                    # Closing/reducing a short position — realize P&L into balance.
+                    close_qty = min(qty, -held)
+                    close_frac = close_qty / qty if qty > 0 else 0.0
+                    realized = (basis - fill_price) * close_qty - fee * close_frac
+                    self.balance += realized
+                    new_held = held + close_qty
+                    remaining = qty - close_qty
+
+                    if remaining > 0:
+                        # Flip into a long for the leftover quantity.
+                        rem_frac = remaining / qty
+                        cost = fill_price * remaining + fee * rem_frac
+                        if cost > self.balance:
+                            logger.warning(
+                                f"Insufficient demo balance to flip into long: need ${cost:,.2f}, have ${self.balance:,.2f}"
+                            )
+                            self._holdings[symbol] = new_held
+                            if abs(new_held) < 1e-12:
+                                self._avg_entry.pop(symbol, None)
+                            return {"id": order_id, "state": "rejected", "reason": "insufficient_balance"}
+                        self.balance -= cost
+                        new_held += remaining
+                        self._avg_entry[symbol] = fill_price
+                    else:
+                        if abs(new_held) < 1e-12:
+                            self._avg_entry.pop(symbol, None)
+
+                    self._holdings[symbol] = new_held
+                else:
+                    # Opening or extending a long.
+                    cost = notional + fee
+                    if cost > self.balance:
+                        logger.warning(f"Insufficient demo balance: need ${cost:,.2f}, have ${self.balance:,.2f}")
+                        return {"id": order_id, "state": "rejected", "reason": "insufficient_balance"}
+                    self.balance -= cost
+                    new_held = held + qty
+                    # Weighted-average entry price.
+                    self._avg_entry[symbol] = (
+                        ((basis * held) + (fill_price * qty)) / new_held
+                        if new_held > 0 else fill_price
+                    )
+                    self._holdings[symbol] = new_held
+            else:  # sell
+                if held > 0:
+                    # Closing/reducing a long.
+                    close_qty = min(qty, held)
+                    close_frac = close_qty / qty if qty > 0 else 0.0
+                    proceeds = fill_price * close_qty - fee * close_frac
+                    self.balance += proceeds
+                    new_held = held - close_qty
+                    remaining = qty - close_qty
+
+                    if remaining > 0:
+                        # Flip into a short for the leftover — no cash change on
+                        # short open; basis tracks where we shorted.
+                        new_held -= remaining
+                        self._avg_entry[symbol] = fill_price
+                    else:
+                        if abs(new_held) < 1e-12:
+                            self._avg_entry.pop(symbol, None)
+
+                    self._holdings[symbol] = new_held
+                else:
+                    # Opening or extending a short — no balance movement; we
+                    # bookmark the entry so closing the short can compute P&L.
+                    short_qty = -held  # current short magnitude (>=0)
+                    new_held = held - qty  # more negative
+                    if held == 0:
+                        self._avg_entry[symbol] = fill_price
+                    else:
+                        total_short = short_qty + qty
+                        self._avg_entry[symbol] = (
+                            (basis * short_qty + fill_price * qty) / total_short
+                            if total_short > 0 else fill_price
+                        )
+                    self._holdings[symbol] = new_held
 
         logger.info(
             f"Mock order: {side} {asset_quantity} {symbol} @ ${fill_price:,.2f} "

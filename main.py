@@ -76,6 +76,68 @@ async def lifespan(app: FastAPI):
         "entry_z=1.1, risk=2.5%, exposure=60%, target=$200+/day"
     )
 
+    # ── One-shot corruption recovery ────────────────────────────────────────
+    # The previous mock-client short bug (d713744) credited free proceeds on
+    # every sell-to-open, compounding into quintillion-dollar demo balances and
+    # quintillion-coin "open" trades. Detect and reset any account where the
+    # numbers are obviously impossible: balance > $1M, or an open trade with
+    # absurd quantity / size. Force-close those trades, reset balance to $10k,
+    # and wipe risk_state so position sizing starts clean.
+    from database import Trade as _Trade, RiskState as _RiskState
+    from sqlalchemy import or_ as _or
+    CORRUPT_BALANCE_THRESHOLD = 1_000_000.0  # $1M — well above any plausible demo gain
+    CORRUPT_QTY_THRESHOLD = 10_000.0          # >10k units of any symbol is impossible from $10k seed
+    async with AsyncSessionLocal() as db:
+        # 1) Users with corrupt demo balance
+        corrupt_users_q = await db.execute(
+            select(User).where(User.demo_balance > CORRUPT_BALANCE_THRESHOLD)
+        )
+        corrupt_users = list(corrupt_users_q.scalars().all())
+
+        # 2) Users with absurd-quantity open demo trades (catch corruption that
+        #    didn't yet reflect in demo_balance — e.g. mid-trade snapshot)
+        bad_trade_users_q = await db.execute(
+            select(_Trade.user_id).where(
+                _Trade.state == "open",
+                _Trade.is_demo == True,
+                _Trade.quantity_value > CORRUPT_QTY_THRESHOLD,
+            ).distinct()
+        )
+        bad_trade_user_ids = {row[0] for row in bad_trade_users_q.all()}
+        if bad_trade_user_ids:
+            extra_q = await db.execute(select(User).where(User.id.in_(bad_trade_user_ids)))
+            existing_ids = {u.id for u in corrupt_users}
+            for u in extra_q.scalars().all():
+                if u.id not in existing_ids:
+                    corrupt_users.append(u)
+
+        for cu in corrupt_users:
+            # Force-close all open trades (demo or live) for this user — any
+            # leftover open trades with corrupt quantities will crash the loop.
+            await db.execute(
+                _Trade.__table__.update()
+                .where(_Trade.user_id == cu.id, _Trade.state == "open")
+                .values(state="closed", exit_reason="corruption_recovery", pnl=0.0, pnl_pct=0.0)
+            )
+            # Reset balance + bot flag so user has a clean slate.
+            await db.execute(
+                _up(User).where(User.id == cu.id).values(
+                    demo_balance=10000.0,
+                    bot_active=False,  # require user to manually restart so they see it
+                )
+            )
+            # Wipe risk-state snapshot so daily P&L / cooldown start fresh.
+            await db.execute(
+                _RiskState.__table__.delete().where(_RiskState.user_id == cu.id)
+            )
+            logger.warning(
+                f"CORRUPTION RECOVERY: user {cu.id[:8]} reset — "
+                f"old_balance=${cu.demo_balance:,.2f}, bot stopped, balance=$10000.00"
+            )
+        if corrupt_users:
+            await db.commit()
+            logger.warning(f"Reset {len(corrupt_users)} corrupted demo accounts")
+
     # Restore previously active bots
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(User).where(User.bot_active == True))
