@@ -170,6 +170,23 @@ function IndicatorPill({ label, value, color }: { label: string; value: string; 
   )
 }
 
+// Format a crypto quantity with sensible decimals: BTC shows 6dp, ETH 4dp,
+// DOGE 0-2dp. Trims trailing zeros so "1.50000000" → "1.5".
+function formatQty(q: string | number | null | undefined): string {
+  if (q === null || q === undefined || q === '') return '—'
+  const n = typeof q === 'string' ? parseFloat(q) : q
+  if (!Number.isFinite(n)) return '—'
+  const abs = Math.abs(n)
+  let dp: number
+  if (abs >= 1000) dp = 2
+  else if (abs >= 1) dp = 4
+  else if (abs >= 0.01) dp = 6
+  else dp = 8
+  // toFixed then strip trailing zeros (but keep at least 2 decimals for readability)
+  const fixed = n.toFixed(dp)
+  return fixed.replace(/(\.\d*?[1-9])0+$|\.0+$/, '$1')
+}
+
 // ── Main Dashboard ────────────────────────────────────────────────────────────
 
 export function Dashboard() {
@@ -982,7 +999,7 @@ export function Dashboard() {
                           {balance.holdings.map((h, i) => (
                             <div key={i} className="flex justify-between items-center px-3 py-2 rounded-xl bg-elevated text-xs">
                               <span className="font-semibold">{h.asset_code}</span>
-                              <span className="font-mono text-muted">{parseFloat(h.total_quantity).toFixed(6)}</span>
+                              <span className="font-mono text-muted">{formatQty(h.total_quantity)}</span>
                             </div>
                           ))}
                         </div>
@@ -1173,7 +1190,7 @@ export function Dashboard() {
                           <td className="py-3 font-mono font-medium">{trade.symbol}</td>
                           <td className="py-3"><span className={`text-xs px-1.5 py-0.5 rounded font-semibold ${trade.is_demo ? 'bg-warning/15 text-warning' : 'bg-profit/15 text-profit'}`}>{trade.is_demo ? 'DEMO' : 'LIVE'}</span></td>
                           <td className="py-3"><span className={`text-xs px-2 py-0.5 rounded font-bold ${trade.side === 'buy' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>{trade.side.toUpperCase()}</span></td>
-                          <td className="py-3 text-xs font-mono text-muted">{trade.quantity}</td>
+                          <td className="py-3 text-xs font-mono text-muted">{formatQty(trade.quantity)}</td>
                           <td className="py-3 text-right font-mono text-xs">{trade.entry_price ? `$${parseFloat(trade.entry_price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '\u2014'}</td>
                           <td className="py-3 text-right font-mono text-xs">{trade.exit_price ? `$${parseFloat(trade.exit_price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '\u2014'}</td>
                           <td className="py-3 text-right font-mono">

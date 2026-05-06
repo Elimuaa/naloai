@@ -163,7 +163,7 @@ export function AdminDashboard() {
               { label: 'Total Trades', value: summary.total_trades, icon: '&#x1f4ca;', color: 'text-accent' },
               { label: 'Closed Trades', value: summary.closed_trades, icon: '&#x2705;', color: 'text-muted' },
               { label: 'Platform P&L', value: `$${(summary.platform_pnl ?? 0).toFixed(2)}`, icon: '&#x1f4b0;', color: (summary.platform_pnl ?? 0) >= 0 ? 'text-profit' : 'text-loss' },
-              { label: 'Monthly Revenue', value: `$${summary.monthly_premium_revenue}`, icon: '&#x1f4b5;', color: 'text-profit' },
+              { label: 'Monthly Revenue', value: `$${(summary.monthly_premium_revenue ?? 0).toFixed(2)}`, icon: '&#x1f4b5;', color: 'text-profit' },
             ].map((card, i) => (
               <div key={i} className="bg-card border border-border rounded-2xl p-4">
                 <div className="flex items-center gap-2 mb-2">
