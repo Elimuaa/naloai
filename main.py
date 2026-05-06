@@ -233,6 +233,24 @@ async def lifespan(app: FastAPI):
                 f"notional > ${ABSURD_QTY_NOTIONAL:,.0f}"
             )
 
+        # 7) Final residue cleanup: trades where an earlier migration zeroed
+        #    quantity but left pnl populated. Their notional is now 0 so the
+        #    notional-based scrub above misses them, but the row is logically
+        #    a corruption artifact (quantity is 0 — there's no economic basis
+        #    for any pnl). Zero pnl on every quantity=0 closed trade.
+        residue = await db.execute(
+            _Trade.__table__.update()
+            .where(
+                _Trade.quantity_value == 0.0,
+                _Trade.state == "closed",
+                __or(_Trade.pnl != 0.0, _Trade.pnl_pct != 0.0, _Trade.partial_pnl != 0.0),
+            )
+            .values(pnl=0.0, pnl_pct=0.0, partial_pnl=0.0)
+        )
+        if residue.rowcount:
+            await db.commit()
+            logger.warning(f"Zeroed pnl on {residue.rowcount} qty=0 residue rows")
+
     # Restore previously active bots
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(User).where(User.bot_active == True))
