@@ -176,6 +176,16 @@ async def lifespan(app: FastAPI):
             await db.commit()
             logger.warning(f"Scrubbed {dr_scrub.rowcount} corrupted daily_reports rows")
 
+        # 5) Operator-requested clean slate: reset *every* user's demo balance
+        #    to $10k so all accounts start from the same baseline post-recovery.
+        #    Idempotent — already-$10k users are unchanged.
+        reset_all = await db.execute(
+            _up(User).where(User.demo_balance != 10000.0).values(demo_balance=10000.0)
+        )
+        if reset_all.rowcount:
+            await db.commit()
+            logger.warning(f"Reset {reset_all.rowcount} users to $10,000 demo balance (clean slate)")
+
     # Restore previously active bots
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(User).where(User.bot_active == True))
