@@ -138,6 +138,44 @@ async def lifespan(app: FastAPI):
             await db.commit()
             logger.warning(f"Reset {len(corrupt_users)} corrupted demo accounts")
 
+        # 3) Scrub absurd historical P&L values on closed trades. The corruption
+        #    bug stamped phantom-trillion P&L into Trade.pnl rows that are now
+        #    polluting platform-wide aggregates (all-time / 7d / 30d).
+        #    Any single trade with |pnl| > $100k on a $10k demo seed is
+        #    definitionally corrupt — zero those out (preserve trade record for
+        #    audit, but neutralize the fake numbers in aggregates).
+        from sqlalchemy import or_ as __or
+        ABSURD_PNL_THRESHOLD = 100_000.0
+        scrub = await db.execute(
+            _Trade.__table__.update()
+            .where(__or(
+                _Trade.pnl > ABSURD_PNL_THRESHOLD,
+                _Trade.pnl < -ABSURD_PNL_THRESHOLD,
+            ))
+            .values(pnl=0.0, pnl_pct=0.0, partial_pnl=0.0)
+        )
+        if scrub.rowcount:
+            await db.commit()
+            logger.warning(
+                f"Scrubbed {scrub.rowcount} corrupted historical trade P&L rows "
+                f"(|pnl| > ${ABSURD_PNL_THRESHOLD:,.0f})"
+            )
+
+        # 4) Daily reports may have already aggregated the corrupt P&L — wipe
+        #    daily_reports rows so they regenerate from clean data on next run.
+        from database import DailyReport as _DailyReport
+        dr_scrub = await db.execute(
+            _DailyReport.__table__.update()
+            .where(__or(
+                _DailyReport.total_pnl > ABSURD_PNL_THRESHOLD,
+                _DailyReport.total_pnl < -ABSURD_PNL_THRESHOLD,
+            ))
+            .values(total_pnl=0.0)
+        )
+        if dr_scrub.rowcount:
+            await db.commit()
+            logger.warning(f"Scrubbed {dr_scrub.rowcount} corrupted daily_reports rows")
+
     # Restore previously active bots
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(User).where(User.bot_active == True))
