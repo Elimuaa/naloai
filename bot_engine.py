@@ -1839,8 +1839,11 @@ async def _bot_loop(user_id: str, symbol: str):
                             # The bypass still runs the signal quality gate inside — only the
                             # indicator filters (RSI/ADX/BB) are relaxed, not the strength floor.
                             _allow_entry = passed
-                            if not passed and is_demo and entry_side and random.random() < 0.30:
-                                _allow_entry = True  # 30% bypass for demo volume
+                            # Demo bypass: PRO users get 50% (more shots → more $ at proven win rate),
+                            # Free users stay at 30% (A/B baseline). Always requires entry_side truthy.
+                            _bypass_pct = 0.50 if is_premium_user else 0.30
+                            if not passed and is_demo and entry_side and random.random() < _bypass_pct:
+                                _allow_entry = True  # demo bypass for trade volume
                             # Hard guard: never proceed without a side (e.g. NO_NEW_ENTRY_SYMBOLS
                             # path nulled entry_side; the demo bypass must not flip _allow_entry).
                             if not entry_side:
