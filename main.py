@@ -186,19 +186,17 @@ async def lifespan(app: FastAPI):
             await db.commit()
             logger.warning(f"Reset {reset_all.rowcount} users to $10,000 demo balance (clean slate)")
 
-        # 6) Scrub absurd trade quantities. The bug stamped quintillion-coin
-        #    quantities into Trade.quantity / quantity_value. Display rows
-        #    showing "86,589,892,941,003,653,120 DOGE" are confusing even
-        #    though P&L was zeroed. Any trade whose notional (qty * entry)
-        #    exceeds $1M is corrupt for our $10k demo accounts — flag it and
-        #    zero the quantity so trade history reads sanely.
-        from sqlalchemy import cast as __cast, Float as __Float
-        # quantity is stored as a string; quantity_value is the numeric mirror.
-        # Use quantity_value where available; fall back to cast on quantity.
-        ABSURD_QTY_NOTIONAL = 1_000_000.0  # $1M position is impossible from $10k
-        # Fetch candidate rows to evaluate notional in Python (entry_price is also string).
+        # 6) Scrub absurd trade quantities AND their P&L. The bug stamped
+        #    impossible quantities into Trade.quantity / quantity_value. Some
+        #    rows had massive qty but a small price move so their pnl slipped
+        #    past the earlier $100k pnl filter — leaving "real-looking" pnl
+        #    backed by fake quantity. Threshold by notional (entry × qty) only:
+        #    any single trade > $50k position is impossible for our $10k demo
+        #    seed (60% exposure = $6k position max even with full compounding
+        #    headroom up to ~$80k). Zero qty AND pnl on those rows.
+        ABSURD_QTY_NOTIONAL = 50_000.0
         cand_q = await db.execute(
-            select(_Trade).where(_Trade.quantity_value > 100.0)  # cheap pre-filter
+            select(_Trade).where(_Trade.quantity_value > 0.0)
         )
         candidates = cand_q.scalars().all()
         scrub_ids: list[str] = []
@@ -211,7 +209,6 @@ async def lifespan(app: FastAPI):
             except (ValueError, TypeError):
                 continue
         if scrub_ids:
-            # Update in chunks to avoid oversized IN clauses.
             CHUNK = 500
             total = 0
             for i in range(0, len(scrub_ids), CHUNK):
@@ -223,13 +220,16 @@ async def lifespan(app: FastAPI):
                         quantity="0",
                         quantity_value=0.0,
                         initial_quantity=0.0,
+                        pnl=0.0,
+                        pnl_pct=0.0,
+                        partial_pnl=0.0,
                         exit_reason="data_corruption_scrubbed",
                     )
                 )
                 total += res.rowcount or 0
             await db.commit()
             logger.warning(
-                f"Scrubbed {total} corrupted trade rows: zeroed quantity where "
+                f"Scrubbed {total} corrupted trade rows (qty + pnl) where "
                 f"notional > ${ABSURD_QTY_NOTIONAL:,.0f}"
             )
 
