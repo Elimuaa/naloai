@@ -1839,8 +1839,12 @@ async def _bot_loop(user_id: str, symbol: str):
                             # The bypass still runs the signal quality gate inside — only the
                             # indicator filters (RSI/ADX/BB) are relaxed, not the strength floor.
                             _allow_entry = passed
-                            if not passed and is_demo and random.random() < 0.30:
+                            if not passed and is_demo and entry_side and random.random() < 0.30:
                                 _allow_entry = True  # 30% bypass for demo volume
+                            # Hard guard: never proceed without a side (e.g. NO_NEW_ENTRY_SYMBOLS
+                            # path nulled entry_side; the demo bypass must not flip _allow_entry).
+                            if not entry_side:
+                                _allow_entry = False
                             if not _allow_entry:
                                 if filter_reasons:
                                     state.last_signal = f"Signal filtered: {filter_reasons[0]}"
