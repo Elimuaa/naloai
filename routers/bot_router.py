@@ -652,21 +652,41 @@ async def save_capital_keys(
 
 @router.post("/test-capital-connection")
 async def test_capital_connection(current_user: User = Depends(get_current_user)):
-    """Test Capital.com live credentials and return account balance."""
+    """Test Capital.com credentials. Reports BOTH demo and live balances so the
+    user can confirm which account the bot will trade against in either mode."""
     if not current_user.capital_api_key or not current_user.capital_identifier:
         return {"ok": False, "error": "No Capital.com credentials saved yet"}
-    try:
-        from capital_client import CapitalComClient
-        client = CapitalComClient(
-            api_key=current_user.capital_api_key,
-            identifier=current_user.capital_identifier,
-            password=current_user.capital_password or "",
-            demo=False,
-        )
-        cash = await client.get_portfolio_cash()
-        return {"ok": True, "balance": cash, "message": f"Connected! Balance: ${cash:,.2f}"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+
+    from capital_client import CapitalComClient
+    results = {}
+    for label, demo_flag in (("demo", True), ("live", False)):
+        try:
+            client = CapitalComClient(
+                api_key=current_user.capital_api_key,
+                identifier=current_user.capital_identifier,
+                password=current_user.capital_password or "",
+                demo=demo_flag,
+            )
+            cash = await client.get_portfolio_cash()
+            results[label] = {"ok": True, "balance": cash}
+        except Exception as e:
+            results[label] = {"ok": False, "error": str(e)[:200]}
+
+    any_ok = any(r.get("ok") for r in results.values())
+    parts = []
+    for label in ("demo", "live"):
+        r = results[label]
+        if r.get("ok"):
+            parts.append(f"{label.upper()}: ${r['balance']:,.2f}")
+        else:
+            parts.append(f"{label.upper()}: error")
+    return {
+        "ok": any_ok,
+        "balance": results["demo"]["balance"] if results["demo"].get("ok") else (results["live"].get("balance") or 0),
+        "demo": results["demo"],
+        "live": results["live"],
+        "message": "Connected! " + " | ".join(parts),
+    }
 
 
 @router.post("/tradovate-keys")
