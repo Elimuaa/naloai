@@ -107,7 +107,8 @@ def _get_client(user: User, force_demo: bool = False):
             except Exception as e:
                 logger.error(f"Capital.com demo client failed for {user.id}, falling back to mock: {e}")
         from mock_capital_client import MockCapitalClient
-        client = MockCapitalClient(symbol=user.trading_symbol, balance=user.demo_balance or 10000.0)
+        _cap_bal = getattr(user, 'capital_demo_balance', None) or user.demo_balance or 10000.0
+        client = MockCapitalClient(symbol=user.trading_symbol, balance=_cap_bal)
     elif broker == 'tradovate':
         from mock_tradovate_client import MockTradovateClient
         client = MockTradovateClient(symbol=user.trading_symbol, balance=user.demo_balance or 10000.0)
@@ -191,6 +192,26 @@ MIN_COOLDOWN_SECONDS = 600  # 10 minutes — re-enter faster after a loss (was 1
 # mean-reversion premise (z>=1.1 → return to z=0) never fired once. Net result was
 # −$18.37 of pure time-decay losses. Re-add once we have momentum-mode parameters.
 NO_NEW_ENTRY_SYMBOLS: set[str] = {"ETH-USD"}
+
+CAPITAL_SYMBOLS: set[str] = {"GOLD", "US100"}
+ROBINHOOD_SYMBOLS: set[str] = {"BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD"}
+
+
+def _broker_for_symbol(symbol: str) -> str:
+    """Return which broker owns this symbol."""
+    s = symbol.upper()
+    if s in CAPITAL_SYMBOLS:
+        return "capital"
+    return "robinhood"
+
+
+async def _persist_balance(user_id: str, symbol: str, balance: float):
+    """Persist demo balance to the correct column for this symbol's broker."""
+    from sqlalchemy import text as _text
+    col = "capital_demo_balance" if _broker_for_symbol(symbol) == "capital" else "demo_balance"
+    async with AsyncSessionLocal() as db:
+        await db.execute(_text(f"UPDATE users SET {col} = :b WHERE id = :uid"), {"b": round(balance, 4), "uid": user_id})
+        await db.commit()
 
 bot_states: dict[str, BotState] = {}
 # Background task registry — prevents asyncio.create_task() results from being GC'd
@@ -367,14 +388,16 @@ async def _recover_state_for_symbol(user_id: str, symbol: str, state: 'BotState'
         logger.error(f"Failed to restore open trades for {user_id}/{symbol}: {e}")
 
 
-async def start_bot(user_id: str, force_demo: bool = False):
-    """Launch bot for a user. Starts 4 parallel loops for crypto users:
+async def start_bot(user_id: str, force_demo: bool = False, broker: str = 'robinhood'):
+    """Launch bot for a user. For 'robinhood' broker, starts 4 parallel loops:
     BTC-USD, ETH-USD, SOL-USD, DOGE-USD — giving ~12-16 trades/day per user.
-    Each loop has its own BotState so they manage positions independently.
-    For Gold/NAS100 brokers (Capital.com / Tradovate), only the primary symbol runs.
+    For 'capital' broker, starts GOLD and US100 loops independently.
+    Both brokers can run simultaneously.
     """
-    # Check if any loop is already running for this user
-    running_keys = [k for k, t in _bot_tasks.items() if k.startswith(f"{user_id}:") and not t.done()]
+    # Check if any loop is already running for THIS broker's symbols
+    running_keys = [k for k, t in _bot_tasks.items()
+                    if k.startswith(f"{user_id}:") and not t.done()
+                    and _broker_for_symbol(k.split(":")[-1]) == broker]
     if running_keys:
         return {"status": "already_running"}
 
@@ -383,22 +406,15 @@ async def start_bot(user_id: str, force_demo: bool = False):
         result = await db.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()
 
-    primary_symbol = (user.trading_symbol if user else "BTC-USD") or "BTC-USD"
-
-    from broker_base import get_asset_class
-    _broker_cls = (getattr(user, 'broker_type', 'robinhood') or 'robinhood').lower().strip()
-    _asset_cls = get_asset_class(primary_symbol)
-
-    if _asset_cls == "crypto":
-        # All 4 loops still spawn so existing open positions on any symbol are managed
+    if broker == 'capital':
+        symbols_to_run = ["GOLD", "US100"]
+    else:
+        # Robinhood: all 4 crypto loops so existing open positions on any symbol are managed
         # to close. New entries on ETH-USD are blocked at the entry gate (see
         # NO_NEW_ENTRY_SYMBOLS below) — 298-trade audit showed 0/28 z_reverts on ETH,
         # i.e. mean-reversion premise never fired. Once existing ETH positions close
         # the loop idles cheaply.
         symbols_to_run = ["BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD"]
-    else:
-        # Gold / NAS100 futures — single asset, no cross-symbol diversification
-        symbols_to_run = [primary_symbol]
 
     # Hydrate the RiskManager from the persisted snapshot ONCE before any loop fires.
     # This protects daily_pnl, Kelly history, and stop-loss cooldowns across restarts.
@@ -445,6 +461,14 @@ async def start_bot(user_id: str, force_demo: bool = False):
         task = asyncio.create_task(_bot_loop(user_id, sym), name=f"bot-{user_id}-{sym}")
         _bot_tasks[_state_key] = task
         logger.info(f"Launched bot loop for {user_id} symbol={sym}")
+
+    # Persist the active flag for the correct broker
+    async with AsyncSessionLocal() as db:
+        if broker == 'capital':
+            await db.execute(update(User).where(User.id == user_id).values(bot_active_capital=True))
+        else:
+            await db.execute(update(User).where(User.id == user_id).values(bot_active=True))
+        await db.commit()
 
     return {"status": "started", "symbols": symbols_to_run}
 
@@ -557,13 +581,7 @@ async def graceful_shutdown_close_all_demo_positions():
             # Persist the new demo balance after the sell
             try:
                 if hasattr(client, "balance"):
-                    async with AsyncSessionLocal() as db:
-                        await db.execute(
-                            update(User).where(User.id == user_id).values(
-                                demo_balance=round(client.balance, 2)
-                            )
-                        )
-                        await db.commit()
+                    await _persist_balance(user_id, symbol, client.balance)
             except Exception:
                 pass
 
@@ -580,23 +598,47 @@ async def graceful_shutdown_close_all_demo_positions():
     return {"closed": closed_count, "failed": failed_count}
 
 
-async def stop_bot(user_id: str):
+async def stop_bot(user_id: str, broker: str = 'all'):
+    """Stop bot loops for one or both brokers.
+
+    broker='robinhood' — stop only Robinhood (crypto) loops
+    broker='capital'   — stop only Capital.com (GOLD/US100) loops
+    broker='all'       — stop everything (backward-compatible default)
+    """
+    # Determine which task/state keys belong to this broker
+    def _key_matches(k: str) -> bool:
+        sym = k.split(":")[-1]
+        if broker == 'all':
+            return True
+        return _broker_for_symbol(sym) == broker
+
     # Persist demo balance before clearing client cache
     for k in list(_client_cache.keys()):
-        if k.startswith(user_id):
-            client = _client_cache[k]
-            if hasattr(client, 'balance'):
-                try:
-                    async with AsyncSessionLocal() as db2:
-                        await db2.execute(
-                            update(User).where(User.id == user_id).values(demo_balance=round(client.balance, 2))
-                        )
-                        await db2.commit()
-                except Exception as _e:
-                    logger.warning(f"stop_bot: failed to persist demo_balance for {user_id}: {_e}")
+        if not k.startswith(user_id):
+            continue
+        # Determine which broker this cache key belongs to by its mode suffix
+        # Cache key format: "{user_id}:{broker}:{mode}"
+        parts = k.split(":")
+        cache_broker = parts[1] if len(parts) >= 3 else 'robinhood'
+        if broker != 'all' and cache_broker != broker:
+            continue
+        client = _client_cache[k]
+        if hasattr(client, 'balance'):
+            try:
+                # Persist to the correct column based on broker
+                bal_col = "capital_demo_balance" if cache_broker == "capital" else "demo_balance"
+                from sqlalchemy import text as _text
+                async with AsyncSessionLocal() as db2:
+                    await db2.execute(
+                        _text(f"UPDATE users SET {bal_col} = :b WHERE id = :uid"),
+                        {"b": round(client.balance, 2), "uid": user_id}
+                    )
+                    await db2.commit()
+            except Exception as _e:
+                logger.warning(f"stop_bot: failed to persist balance for {user_id} ({cache_broker}): {_e}")
 
-    # Cancel ALL symbol-keyed tasks for this user
-    task_keys = [k for k in list(_bot_tasks.keys()) if k.startswith(f"{user_id}:")]
+    # Cancel tasks for the targeted broker's symbols
+    task_keys = [k for k in list(_bot_tasks.keys()) if k.startswith(f"{user_id}:") and _key_matches(k)]
     for tk in task_keys:
         task = _bot_tasks[tk]
         task.cancel()
@@ -606,68 +648,82 @@ async def stop_bot(user_id: str):
             pass
         del _bot_tasks[tk]
 
-    # Clear state and client cache
-    state_keys = [k for k in list(bot_states.keys()) if k.startswith(f"{user_id}:")]
+    # Clear state for targeted broker's symbols
+    state_keys = [k for k in list(bot_states.keys()) if k.startswith(f"{user_id}:") and _key_matches(k)]
     for sk in state_keys:
         del bot_states[sk]
 
+    # Clear client cache entries for targeted broker
     for k in list(_client_cache.keys()):
-        if k.startswith(user_id):
+        if not k.startswith(user_id):
+            continue
+        parts = k.split(":")
+        cache_broker = parts[1] if len(parts) >= 3 else 'robinhood'
+        if broker == 'all' or cache_broker == broker:
             del _client_cache[k]
 
+    # Persist inactive flags to DB
     async with AsyncSessionLocal() as db:
-        await db.execute(update(User).where(User.id == user_id).values(bot_active=False))
+        if broker == 'capital':
+            await db.execute(update(User).where(User.id == user_id).values(bot_active_capital=False))
+        elif broker == 'robinhood':
+            await db.execute(update(User).where(User.id == user_id).values(bot_active=False))
+        else:  # 'all'
+            await db.execute(update(User).where(User.id == user_id).values(bot_active=False, bot_active_capital=False))
         await db.commit()
+
     await notifications.notify_bot_stopped()
     return {"status": "stopped"}
 
 
 def get_bot_status(user_id: str) -> dict:
-    # Aggregate running status across all symbol loops for this user
-    running_tasks = {k: t for k, t in _bot_tasks.items()
-                     if k.startswith(f"{user_id}:") and not t.done()}
-    running = len(running_tasks) > 0
-
-    # Primary state: find most active (in-trade, or most recently updated)
-    user_states = {k: v for k, v in bot_states.items() if k.startswith(f"{user_id}:")}
-    # Prefer the state that is currently in trade
-    primary_state = None
-    for st in user_states.values():
-        if st.in_trade:
-            primary_state = st
-            break
-    if primary_state is None:
-        # Fall back to any state (last alphabetically for determinism)
-        if user_states:
-            primary_state = list(user_states.values())[-1]
-        else:
-            primary_state = BotState()
-
+    """Return per-broker status dict: {"robinhood": {...}, "capital": {...}}."""
     risk_mgr = _risk_managers.get(user_id)
 
-    # Count total open positions across all symbol loops
-    open_position_count = sum(
-        (1 if st.in_trade else 0) + (1 if st.second_slot is not None else 0)
-        for st in user_states.values()
-    )
-
-    return {
-        "running": running,
-        "in_trade": primary_state.in_trade,
-        "entry_price": primary_state.entry_price,
-        "trade_side": primary_state.trade_side,
-        "trail_stop": primary_state.trail_stop_price,
-        "last_signal": primary_state.last_signal,
-        "last_update": primary_state.last_update,
-        "error_count": primary_state.error_count,
-        "demo_mode": primary_state.demo_mode,
-        "key_invalid": primary_state.key_invalid,
-        "position_size": primary_state.current_quantity,
-        "risk": risk_mgr.get_status() if risk_mgr else None,
-        "open_position_count": open_position_count,
-        "active_symbols": list(running_tasks.keys()),
-        "last_setup_score": primary_state.last_setup_score,
+    result: dict = {
+        "robinhood": {"running": False, "symbols": []},
+        "capital": {"running": False, "symbols": []},
     }
+
+    for key, state in bot_states.items():
+        if not key.startswith(f"{user_id}:"):
+            continue
+        sym = key.split(":")[-1]
+        broker = _broker_for_symbol(sym)
+        task = _bot_tasks.get(key)
+        is_running = task is not None and not task.done()
+
+        broker_status = result[broker]
+        broker_status["running"] = broker_status["running"] or is_running
+        broker_status["symbols"].append(sym)
+
+        # Merge state fields — use first active (in-trade) symbol's state for display
+        if is_running or not broker_status.get("in_trade"):
+            broker_status.update({
+                "in_trade": state.in_trade,
+                "entry_price": float(state.entry_price) if state.entry_price else None,
+                "trade_side": state.trade_side,
+                "trail_stop": float(state.trail_stop_price) if state.trail_stop_price else None,
+                "last_signal": state.last_signal,
+                "last_update": state.last_update,
+                "error_count": state.error_count,
+                "demo_mode": state.demo_mode,
+                "key_invalid": state.key_invalid,
+                "indicators": state.indicators,
+                "position_size": state.current_quantity,
+                "risk": risk_mgr.get_status() if risk_mgr else None,
+            })
+
+    # Also expose a flattened top-level view for backward compat with internal callers
+    # that may read result["running"] directly (health_monitor, etc.)
+    # The primary broker is whichever has a running loop; prefer robinhood.
+    _primary = result["robinhood"] if result["robinhood"]["running"] else result["capital"]
+    result["running"] = result["robinhood"]["running"] or result["capital"]["running"]
+    result["in_trade"] = _primary.get("in_trade", False)
+    result["demo_mode"] = _primary.get("demo_mode", True)
+    result["key_invalid"] = _primary.get("key_invalid", False)
+
+    return result
 
 
 def _adaptive_rr(base_sl_pct: float, base_tp_pct: float, regime: str, side: str) -> tuple[float, float]:
@@ -999,8 +1055,10 @@ async def _bot_loop(user_id: str, symbol: str):
     while True:
         try:
             user = await _get_user_config(user_id)
-            if not user or not user.bot_active:
-                logger.info(f"Bot disabled for user {user_id} ({symbol}), stopping")
+            sym_broker = _broker_for_symbol(symbol)
+            _still_active = getattr(user, 'bot_active_capital', False) if sym_broker == 'capital' else getattr(user, 'bot_active', False)
+            if not user or not _still_active:
+                logger.info(f"Bot disabled for user {user_id} ({symbol}/{sym_broker}), stopping")
                 break
 
             broker = (getattr(user, 'broker_type', 'robinhood') or 'robinhood').lower().strip()
@@ -1336,11 +1394,8 @@ async def _bot_loop(user_id: str, symbol: str):
 
                             # Persist demo balance after partial close
                             if is_demo and hasattr(client, 'balance'):
-                                async with AsyncSessionLocal() as db2:
-                                    await db2.execute(
-                                        update(User).where(User.id == user_id).values(demo_balance=round(client.balance, 2))
-                                    )
-                                    await db2.commit()
+                                _pb = asyncio.create_task(_persist_balance(user_id, symbol, client.balance))
+                                _background_tasks.add(_pb); _pb.add_done_callback(_background_tasks.discard)
 
                             logger.info(
                                 f"Partial exit {user_id}: closed {half_qty} @ {current_price}, "
@@ -1573,11 +1628,8 @@ async def _bot_loop(user_id: str, symbol: str):
 
                     # Persist updated demo balance to DB
                     if is_demo and hasattr(client, 'balance'):
-                        async with AsyncSessionLocal() as db2:
-                            await db2.execute(
-                                update(User).where(User.id == user_id).values(demo_balance=client.balance)
-                            )
-                            await db2.commit()
+                        _pb = asyncio.create_task(_persist_balance(user_id, symbol, client.balance))
+                        _background_tasks.add(_pb); _pb.add_done_callback(_background_tasks.discard)
 
                     # Daily target progress — compounds with balance
                     _live_balance = client.balance if is_demo and hasattr(client, 'balance') else balance
@@ -1590,12 +1642,14 @@ async def _bot_loop(user_id: str, symbol: str):
                     await ws_manager.send_to_user(user_id, {
                         "type": "trade_closed",
                         "symbol": symbol,
+                        "broker": _broker_for_symbol(symbol),
                         "exit_price": current_price,
                         "exit_reason": exit_reason,
                         "pnl": round(pnl, 2),
                         "pnl_pct": round(pnl_pct, 2),
                         "demo_mode": is_demo,
                         "demo_balance": round(_live_balance, 2) if is_demo else None,
+                        "balance_broker": _broker_for_symbol(symbol),
                         "risk": risk_mgr.get_status(),
                         # Daily compounding target
                         "daily_pnl": round(_daily_pnl, 2),
@@ -1747,11 +1801,8 @@ async def _bot_loop(user_id: str, symbol: str):
                         state.consecutive_wins += 1
 
                     if is_demo and hasattr(client, 'balance'):
-                        async with AsyncSessionLocal() as _db2:
-                            await _db2.execute(
-                                update(User).where(User.id == user_id).values(demo_balance=round(client.balance, 2))
-                            )
-                            await _db2.commit()
+                        _pb2 = asyncio.create_task(_persist_balance(user_id, symbol, client.balance))
+                        _background_tasks.add(_pb2); _pb2.add_done_callback(_background_tasks.discard)
 
                     # ── Feed the strategy_memory bucket for the second slot too ──
                     # Without this, ~half of high-confidence trades never enter the
@@ -1785,12 +1836,14 @@ async def _bot_loop(user_id: str, symbol: str):
                     await ws_manager.send_to_user(user_id, {
                         "type": "trade_closed",
                         "symbol": symbol,
+                        "broker": _broker_for_symbol(symbol),
                         "exit_price": current_price,
                         "exit_reason": exit_reason2,
                         "pnl": round(_pnl2, 2),
                         "pnl_pct": round(_pnl_pct2, 2),
                         "demo_mode": is_demo,
                         "demo_balance": round(client.balance, 2) if is_demo and hasattr(client, 'balance') else None,
+                        "balance_broker": _broker_for_symbol(symbol),
                         "slot": "second",
                     })
 
@@ -2160,20 +2213,19 @@ async def _bot_loop(user_id: str, symbol: str):
                                     state.trail_stop_price = None
                                     # Persist demo balance after entry deduction
                                     if is_demo and hasattr(client, 'balance'):
-                                        async with AsyncSessionLocal() as db2:
-                                            await db2.execute(
-                                                update(User).where(User.id == user_id).values(demo_balance=round(client.balance, 2))
-                                            )
-                                            await db2.commit()
+                                        _pb = asyncio.create_task(_persist_balance(user_id, symbol, client.balance))
+                                        _background_tasks.add(_pb); _pb.add_done_callback(_background_tasks.discard)
 
                                     await ws_manager.send_to_user(user_id, {
                                         "type": "trade_opened",
                                         "symbol": symbol,
+                                        "broker": _broker_for_symbol(symbol),
                                         "side": entry_side,
                                         "entry_price": current_price,
                                         "demo_mode": is_demo,
                                         "quantity": quantity,
                                         "demo_balance": round(client.balance, 2) if is_demo and hasattr(client, 'balance') else None,
+                                        "balance_broker": _broker_for_symbol(symbol),
                                     })
 
                                     # Telegram notification
@@ -2263,12 +2315,14 @@ async def _bot_loop(user_id: str, symbol: str):
                                     await ws_manager.send_to_user(user_id, {
                                         "type": "trade_opened",
                                         "symbol": symbol,
+                                        "broker": _broker_for_symbol(symbol),
                                         "side": _s2_side,
                                         "entry_price": current_price,
                                         "demo_mode": is_demo,
                                         "quantity": _s2_qty,
                                         "slot": "second",
                                         "demo_balance": round(client.balance, 2) if is_demo and hasattr(client, 'balance') else None,
+                                        "balance_broker": _broker_for_symbol(symbol),
                                     })
 
             # Daily target progress for UI progress bar
@@ -2280,6 +2334,7 @@ async def _bot_loop(user_id: str, symbol: str):
             await ws_manager.send_to_user(user_id, {
                 "type": "status_update",
                 "symbol": symbol,
+                "broker": _broker_for_symbol(symbol),
                 "price": current_price,
                 "in_trade": state.in_trade,
                 "entry_price": state.entry_price,
@@ -2288,6 +2343,7 @@ async def _bot_loop(user_id: str, symbol: str):
                 "last_signal": state.last_signal,
                 "demo_mode": is_demo,
                 "demo_balance": round(_cur_balance, 2) if is_demo and hasattr(client, 'balance') else None,
+                "balance_broker": _broker_for_symbol(symbol),
                 "position_size": state.current_quantity,
                 "risk": risk_mgr.get_status(),
                 # Daily compounding target

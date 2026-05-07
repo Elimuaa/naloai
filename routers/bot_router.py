@@ -41,7 +41,8 @@ class AnthropicKeyPayload(BaseModel):
 
 
 class StartPayload(BaseModel):
-    mode: str = "auto"
+    mode: str = "demo"
+    broker: str = "robinhood"  # "robinhood" or "capital"
 
 
 class DemoBalancePayload(BaseModel):
@@ -196,38 +197,32 @@ async def bot_start(
     db: AsyncSession = Depends(get_db)
 ):
     mode = payload.mode
-    broker = (getattr(current_user, 'broker_type', 'robinhood') or 'robinhood').lower().strip()
+    broker = payload.broker.lower().strip() if payload.broker else 'robinhood'
 
     if mode == "live":
         if broker == 'robinhood' and not (current_user.rh_api_key and current_user.ed25519_private_key):
             raise HTTPException(400, "Add your Robinhood API key in Settings before going live")
         elif broker == 'capital' and not (current_user.capital_api_key and current_user.capital_identifier):
             raise HTTPException(400, "Add your Capital.com API key in Settings before going live")
-        elif broker == 'tradovate' and not (current_user.tradovate_username and current_user.tradovate_password):
-            raise HTTPException(400, "Add your Tradovate credentials in Settings before going live")
 
-    from bot_engine import bot_states, _bot_tasks
+    from bot_engine import bot_states, _bot_tasks, _broker_for_symbol
     _key_invalid = any(
         st.key_invalid for k, st in bot_states.items() if k.startswith(f"{current_user.id}:")
     )
     if mode == "live" and broker == 'robinhood' and _key_invalid:
         raise HTTPException(400, "Your Robinhood API key is invalid — paste a new one in Settings first")
 
-    # ── Race guard: reject double-start before touching DB or spawning loops ──
-    # Two rapid POST /start requests can both pass the checks above before either
-    # has written to _bot_tasks, creating duplicate loops on the same symbol.
+    # ── Race guard: reject double-start for THIS broker before touching DB or spawning loops ──
     _already_running = any(
         not t.done()
         for k, t in _bot_tasks.items()
-        if k.startswith(f"{current_user.id}:")
+        if k.startswith(f"{current_user.id}:") and _broker_for_symbol(k.split(":")[-1]) == broker
     )
     if _already_running:
-        return {"status": "already_running", "mode": "demo" if force_demo else "live"}
+        return {"status": "already_running", "mode": mode, "broker": broker}
 
     force_demo = (mode == "demo")
-    await db.execute(update(User).where(User.id == current_user.id).values(bot_active=True))
-    await db.commit()
-    result = await start_bot(current_user.id, force_demo=force_demo)
+    result = await start_bot(current_user.id, force_demo=force_demo, broker=broker)
 
     import notifications
     if getattr(current_user, 'telegram_enabled', False):
@@ -238,12 +233,16 @@ async def bot_start(
         ))
         _background_tasks.add(_nt); _nt.add_done_callback(_background_tasks.discard)
 
-    return {**result, "mode": "demo" if force_demo or not current_user.rh_api_key else "live"}
+    return {**result, "mode": mode, "broker": broker}
+
+
+class StopPayload(BaseModel):
+    broker: str = "all"  # "robinhood", "capital", or "all"
 
 
 @router.post("/stop")
-async def bot_stop(current_user: User = Depends(get_current_user)):
-    result = await stop_bot(current_user.id)
+async def bot_stop(payload: StopPayload = StopPayload(), current_user: User = Depends(get_current_user)):
+    result = await stop_bot(current_user.id, broker=payload.broker)
     return result
 
 
@@ -289,7 +288,41 @@ async def get_settings(current_user: User = Depends(get_current_user)):
         "telegram_configured": bool(os.getenv("TELEGRAM_BOT_TOKEN")) and bool(os.getenv("TELEGRAM_CHAT_ID")),
         # Premium
         "is_premium": getattr(current_user, 'is_premium', False),
+        # Capital.com independent bot
+        "capital_demo_balance": getattr(current_user, 'capital_demo_balance', 10000.0) or 10000.0,
+        "bot_active_capital": getattr(current_user, 'bot_active_capital', False),
     }
+
+
+@router.get("/balances")
+async def get_all_balances(current_user: User = Depends(get_current_user)):
+    """Return available balance for both brokers."""
+    from bot_engine import _client_cache
+    result = {}
+
+    # Robinhood balance
+    rh_client = (_client_cache.get(f"{current_user.id}:robinhood:demo")
+                 or _client_cache.get(f"{current_user.id}:robinhood:live"))
+    if rh_client and hasattr(rh_client, 'balance'):
+        result["robinhood"] = {"available": round(rh_client.balance, 2), "is_demo": True}
+    else:
+        result["robinhood"] = {"available": current_user.demo_balance or 10000.0, "is_demo": True}
+
+    # Capital.com balance
+    cap_client = (_client_cache.get(f"{current_user.id}:capital:demo")
+                  or _client_cache.get(f"{current_user.id}:capital:live"))
+    if cap_client and hasattr(cap_client, 'get_portfolio_cash'):
+        try:
+            cash = await cap_client.get_portfolio_cash()
+            result["capital"] = {"available": cash, "is_demo": getattr(cap_client, '_demo', True)}
+        except Exception:
+            result["capital"] = {"available": getattr(current_user, 'capital_demo_balance', 10000.0), "is_demo": True}
+    elif cap_client and hasattr(cap_client, 'balance'):
+        result["capital"] = {"available": round(cap_client.balance, 2), "is_demo": True}
+    else:
+        result["capital"] = {"available": getattr(current_user, 'capital_demo_balance', 10000.0), "is_demo": True}
+
+    return result
 
 
 @router.get("/balance")

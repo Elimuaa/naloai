@@ -6,7 +6,7 @@ import { api, getAccessToken } from '../api/axios'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface BotStatus {
+interface BrokerBotStatus {
   running: boolean
   in_trade: boolean
   entry_price: number | null
@@ -19,6 +19,7 @@ interface BotStatus {
   key_invalid?: boolean
   indicators?: Record<string, any>
   position_size?: number
+  symbols?: string[]
   risk?: {
     is_paused: boolean
     pause_reason: string
@@ -30,6 +31,24 @@ interface BotStatus {
     max_stops: number
   }
 }
+
+interface BotStatusMap {
+  robinhood: BrokerBotStatus
+  capital: BrokerBotStatus
+  // backward-compat top-level fields
+  running?: boolean
+  in_trade?: boolean
+  demo_mode?: boolean
+  key_invalid?: boolean
+}
+
+interface BrokerBalances {
+  robinhood: { available: number; is_demo: boolean }
+  capital: { available: number; is_demo: boolean }
+}
+
+// Legacy alias — keeps older references compiling
+type BotStatus = BrokerBotStatus
 
 interface Trade {
   id: string
@@ -121,6 +140,8 @@ interface Settings {
   broker_type?: string
   has_capital_keys?: boolean
   has_tradovate_keys?: boolean
+  capital_demo_balance?: number
+  bot_active_capital?: boolean
 }
 
 interface Balance {
@@ -170,6 +191,69 @@ function IndicatorPill({ label, value, color }: { label: string; value: string; 
   )
 }
 
+function BotCard({ broker, label, icon, symbols, status, loading, hasKeys, onStart, onStop, balance, balanceLabel }: {
+  broker: string; label: string; icon: string; symbols: string[]
+  status: BrokerBotStatus | null; loading: boolean; hasKeys: boolean
+  onStart: (mode: 'demo' | 'live') => void; onStop: () => void
+  balance: number | null; balanceLabel: string
+}) {
+  const running = status?.running ?? false
+  const isDemo = status?.demo_mode ?? true
+  return (
+    <div className={`rounded-2xl border p-4 flex flex-col gap-3 ${running ? (isDemo ? 'border-warning/40 bg-warning/5' : 'border-profit/40 bg-profit/5') : 'border-border bg-elevated'}`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-lg">{icon}</span>
+          <div>
+            <p className="font-semibold text-sm text-white">{label}</p>
+            <p className="text-xs text-muted">{symbols.join(' \u00b7 ')}</p>
+          </div>
+        </div>
+        <div className={`px-2 py-1 rounded-full text-xs font-bold border ${
+          running ? (isDemo ? 'text-warning border-warning/40 bg-warning/10' : 'text-profit border-profit/40 bg-profit/10')
+                  : 'text-muted border-border bg-elevated'}`}>
+          {running ? (isDemo ? 'DEMO' : 'LIVE') : 'OFF'}
+        </div>
+      </div>
+
+      {/* Balance */}
+      <div className="rounded-xl bg-surface/60 px-3 py-2 flex items-center justify-between" style={{ backgroundColor: 'rgba(255,255,255,0.04)' }}>
+        <span className="text-xs text-muted">{balanceLabel}</span>
+        <span className="font-mono font-bold text-sm text-white">
+          {balance != null ? `$${balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '\u2014'}
+        </span>
+      </div>
+
+      {/* Signal */}
+      {running && status?.last_signal && (
+        <p className="text-xs text-muted/80 truncate">{status.last_signal.startsWith('Warming') ? 'Analyzing market data...' : status.last_signal.startsWith('Paused:') ? status.last_signal : 'Scanning for opportunities...'}</p>
+      )}
+
+      {/* Controls */}
+      <div className="flex gap-2 mt-auto">
+        {running ? (
+          <button onClick={onStop} disabled={loading}
+            className="flex-1 px-3 py-2 rounded-lg bg-loss/20 border border-loss/40 text-loss text-xs font-semibold hover:bg-loss/30 transition-colors disabled:opacity-50">
+            {loading ? '...' : 'Stop'}
+          </button>
+        ) : (
+          <>
+            <button onClick={() => onStart('demo')} disabled={loading}
+              className="flex-1 px-3 py-2 rounded-lg bg-warning/15 border border-warning/40 text-warning text-xs font-semibold hover:bg-warning/25 transition-colors disabled:opacity-50">
+              {loading ? '...' : 'Start Demo'}
+            </button>
+            <button onClick={() => onStart('live')} disabled={loading || !hasKeys}
+              title={!hasKeys ? 'Add API keys in Settings first' : 'Start live trading'}
+              className="flex-1 px-3 py-2 rounded-lg bg-profit/15 border border-profit/40 text-profit text-xs font-semibold hover:bg-profit/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+              {loading ? '...' : 'Start Live'}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // Format a crypto quantity with sensible decimals: BTC shows 6dp, ETH 4dp,
 // DOGE 0-2dp. Trims trailing zeros so "1.50000000" → "1.5".
 function formatQty(q: string | number | null | undefined): string {
@@ -194,7 +278,9 @@ export function Dashboard() {
   const navigate = useNavigate()
 
   const [activeTab, setActiveTab] = useState<'dashboard' | 'trades' | 'analytics' | 'settings'>('dashboard')
-  const [botStatus, setBotStatus] = useState<BotStatus | null>(null)
+  const [botStatus, setBotStatus] = useState<BotStatusMap | null>(null)
+  const [brokerBalances, setBrokerBalances] = useState<BrokerBalances | null>(null)
+  const [capitalDemoBalance, setCapitalDemoBalance] = useState<number | null>(null)
   const [livePrice, setLivePrice] = useState<number | null>(null)
   const [liveZ, setLiveZ] = useState<number | null>(null)
   const [trades, setTrades] = useState<Trade[]>([])
@@ -209,13 +295,16 @@ export function Dashboard() {
   const [feed, setFeed] = useState<LiveEvent[]>([])
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null)
   const [botLoading, setBotLoading] = useState(false)
+  const [botLoadingRh, setBotLoadingRh] = useState(false)
+  const [botLoadingCap, setBotLoadingCap] = useState(false)
+  const [brokerFilter, setBrokerFilter] = useState<'all' | 'robinhood' | 'capital'>('all')
   // Daily compounding target
   const [dailyPnl, setDailyPnl] = useState(0)
   const [dailyTarget, setDailyTarget] = useState(200)
   const [dailyProgressPct, setDailyProgressPct] = useState(0)
   const [settingsLoading, setSettingsLoading] = useState(false)
   const [keysLoading, setKeysLoading] = useState(false)
-  const [balance, setBalance] = useState<Balance | null>(null)
+  const [balance, setBalance] = useState<Balance | null>(null)  // kept for legacy /balance endpoint
   const [showConfirm, setShowConfirm] = useState(false)
   const [pendingSettings, setPendingSettings] = useState<null | Record<string, any>>(null)
 
@@ -303,17 +392,18 @@ export function Dashboard() {
 
   const loadData = useCallback(async () => {
     const modeParam = tradeFilter !== 'all' ? `&mode=${tradeFilter}` : ''
+    const brokerParam = brokerFilter !== 'all' ? `&broker=${brokerFilter}` : ''
     const results = await Promise.allSettled([
       api.get('/api/bot/status'),
-      api.get(`/api/trades?limit=20${modeParam}`),
-      api.get(`/api/trades/stats?mode=${tradeFilter}`),
+      api.get(`/api/trades?limit=20${modeParam}${brokerParam}`),
+      api.get(`/api/trades/stats?mode=${tradeFilter}${brokerParam}`),
       api.get('/api/reports/latest'),
       api.get('/api/bot/settings'),
       api.get('/api/trades/stats?mode=demo'),
       api.get('/api/trades/stats?mode=live'),
     ])
     const [statusR, tradesR, statsR, reportR, settingsR, demoStatsR, liveStatsR] = results
-    if (statusR.status === 'fulfilled') setBotStatus(statusR.value.data)
+    if (statusR.status === 'fulfilled') setBotStatus(statusR.value.data as BotStatusMap)
     if (tradesR.status === 'fulfilled') setTrades(tradesR.value.data)
     if (statsR.status === 'fulfilled') setStats(statsR.value.data)
     if (demoStatsR.status === 'fulfilled') setDemoStats(demoStatsR.value.data)
@@ -328,6 +418,7 @@ export function Dashboard() {
       setFormTrailStop(s.trail_stop_pct)
       setDemoBalanceInput(String(s.demo_balance ?? 10000))
       if (!liveDemoBalance) setLiveDemoBalance(s.demo_balance ?? 10000)
+      if (s.capital_demo_balance && !capitalDemoBalance) setCapitalDemoBalance(s.capital_demo_balance)
       // Risk
       setFormMaxDrawdown(s.max_drawdown_pct ?? 5.0)
       setFormMaxStops(s.max_stops_before_pause ?? 3)
@@ -349,13 +440,15 @@ export function Dashboard() {
         if (r.data.is_demo && r.data.available) setLiveDemoBalance(r.data.available)
       }).catch(() => {})
     }
+    // Fetch both-broker balances
+    api.get('/api/bot/balances').then(r => setBrokerBalances(r.data)).catch(() => {})
     // Fetch premium status
     api.get('/api/bot/premium/status').then(r => {
       setIsPremium(r.data.is_premium)
       setPremiumData(r.data)
       if (r.data.recent_calibrations) setCalibrations(r.data.recent_calibrations)
     }).catch(() => {})
-  }, [tradeFilter])
+  }, [tradeFilter, brokerFilter])
 
   // Build equity curve from trades, filtered by perfMode
   useEffect(() => {
@@ -399,7 +492,13 @@ export function Dashboard() {
           const isPrimary = !d.symbol || d.symbol === primarySymbolRef.current
           // Account-level fields (demo_balance, daily_pnl, daily_target) are global
           // across all loops, so always accept them regardless of symbol.
-          if (d.demo_balance != null) setLiveDemoBalance(d.demo_balance)
+          if (d.demo_balance != null) {
+            if (d.balance_broker === 'capital') {
+              setCapitalDemoBalance(d.demo_balance)
+            } else {
+              setLiveDemoBalance(d.demo_balance)
+            }
+          }
           if (typeof d.daily_pnl === 'number') setDailyPnl(d.daily_pnl)
           if (typeof d.daily_target === 'number') setDailyTarget(d.daily_target)
           if (typeof d.daily_progress_pct === 'number') setDailyProgressPct(d.daily_progress_pct)
@@ -409,16 +508,41 @@ export function Dashboard() {
           if (d.price) {
             setPriceHistory(prev => [...prev.slice(-120), { time: new Date().toLocaleTimeString(), price: d.price, z: d.z_score }])
           }
-          setBotStatus(prev => prev
-            ? { ...prev, running: true, in_trade: d.in_trade, entry_price: d.entry_price, trade_side: d.trade_side, trail_stop: d.trail_stop, last_signal: d.last_signal, demo_mode: d.demo_mode, indicators: d.indicators, position_size: d.position_size, risk: d.risk, ...(d.key_invalid != null ? { key_invalid: d.key_invalid } : {}) }
-            : null)
+          setBotStatus(prev => {
+            if (!prev) return prev
+            const broker: 'robinhood' | 'capital' = d.broker === 'capital' ? 'capital' : 'robinhood'
+            const brokerState = prev[broker] ?? {}
+            const updatedBroker: BrokerBotStatus = {
+              ...brokerState,
+              running: true,
+              in_trade: d.in_trade,
+              entry_price: d.entry_price,
+              trade_side: d.trade_side,
+              trail_stop: d.trail_stop,
+              last_signal: d.last_signal,
+              demo_mode: d.demo_mode,
+              indicators: d.indicators,
+              position_size: d.position_size,
+              risk: d.risk,
+              error_count: brokerState.error_count ?? 0,
+              last_update: brokerState.last_update ?? null,
+              ...(d.key_invalid != null ? { key_invalid: d.key_invalid } : {}),
+            }
+            return { ...prev, [broker]: updatedBroker, running: prev.running || true }
+          })
         } else if (d.type === 'trade_opened') {
-          if (d.demo_balance != null) setLiveDemoBalance(d.demo_balance)
+          if (d.demo_balance != null) {
+            if (d.balance_broker === 'capital') setCapitalDemoBalance(d.demo_balance)
+            else setLiveDemoBalance(d.demo_balance)
+          }
           addFeed('trade_opened', `${String(d.side || 'UNKNOWN').toUpperCase()} ${d.symbol} @ $${typeof d.entry_price === 'number' ? d.entry_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'N/A'}${d.demo_mode ? ' [DEMO]' : ''}`, 'text-profit')
           loadData()
         } else if (d.type === 'trade_closed') {
           const pnl = (typeof d.pnl === 'number' && !isNaN(d.pnl)) ? d.pnl : 0
-          if (d.demo_balance != null) setLiveDemoBalance(d.demo_balance)
+          if (d.demo_balance != null) {
+            if (d.balance_broker === 'capital') setCapitalDemoBalance(d.demo_balance)
+            else setLiveDemoBalance(d.demo_balance)
+          }
           if (typeof d.daily_pnl === 'number') setDailyPnl(d.daily_pnl)
           if (typeof d.daily_target === 'number') setDailyTarget(d.daily_target)
           if (typeof d.daily_progress_pct === 'number') setDailyProgressPct(d.daily_progress_pct)
@@ -479,7 +603,7 @@ export function Dashboard() {
     const fetchPrice = async () => {
       // Skip market price fetch when bot is running — bot sends its own price via WebSocket
       // This prevents mixing real market prices with simulated demo prices
-      if (botStatus?.running) return
+      if (botStatus?.running || botStatus?.robinhood?.running || botStatus?.capital?.running) return
       try {
         const res = await api.get(`/api/market/price?symbol=${symbol}`)
         if (res.data.price && !stale) setLivePrice(res.data.price)
@@ -488,7 +612,7 @@ export function Dashboard() {
     fetchPrice()
     const interval = setInterval(fetchPrice, 5000)
     return () => { stale = true; clearInterval(interval) }
-  }, [settings?.trading_symbol, botStatus?.running])
+  }, [settings?.trading_symbol, botStatus?.running, botStatus?.robinhood?.running, botStatus?.capital?.running])
 
   useEffect(() => {
     loadData()
@@ -509,32 +633,38 @@ export function Dashboard() {
     }
   }, [loadData, connectWS])
 
-  const startBot = async (mode: 'demo' | 'live') => {
+  const startBot = async (broker: 'robinhood' | 'capital', mode: 'demo' | 'live') => {
+    const setLoading = broker === 'capital' ? setBotLoadingCap : setBotLoadingRh
+    setLoading(true)
     setBotLoading(true)
     try {
-      const res = await api.post('/api/bot/start', { mode })
+      await api.post('/api/bot/start', { mode, broker })
       await refreshUser()
       const r = await api.get('/api/bot/status')
-      setBotStatus(r.data)
-      showToast(mode === 'live' ? 'Bot started in LIVE mode' : 'Bot started in Demo mode')
+      setBotStatus(r.data as BotStatusMap)
+      const label = broker === 'capital' ? 'Capital.com' : 'Robinhood'
+      showToast(`${label} bot started (${mode})`)
       setTradeFilter(mode === 'live' ? 'live' : 'demo')
-      if (res.data?.mode) addFeed('connected', `Bot running in ${res.data.mode.toUpperCase()} mode`, mode === 'live' ? 'text-profit' : 'text-warning')
+      addFeed('connected', `${label} bot running in ${mode.toUpperCase()} mode`, mode === 'live' ? 'text-profit' : 'text-warning')
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       showToast(detail ?? 'Failed to start bot', false)
-    } finally { setBotLoading(false) }
+    } finally { setLoading(false); setBotLoading(false) }
   }
 
-  const stopBot = async () => {
+  const stopBot = async (broker: 'robinhood' | 'capital' | 'all' = 'all') => {
+    const setLoading = broker === 'capital' ? setBotLoadingCap : broker === 'robinhood' ? setBotLoadingRh : setBotLoading
+    setLoading(true)
     setBotLoading(true)
     try {
-      await api.post('/api/bot/stop')
+      await api.post('/api/bot/stop', { broker })
       await refreshUser()
       const r = await api.get('/api/bot/status')
-      setBotStatus(r.data)
-      showToast('Bot stopped')
+      setBotStatus(r.data as BotStatusMap)
+      const label = broker === 'capital' ? 'Capital.com' : broker === 'robinhood' ? 'Robinhood' : 'All bots'
+      showToast(`${label} stopped`)
     } catch { showToast('Failed to stop bot', false) }
-    finally { setBotLoading(false) }
+    finally { setLoading(false); setBotLoading(false) }
   }
 
   const saveKeys = async () => {
@@ -710,6 +840,10 @@ export function Dashboard() {
 
   const handleLogout = async () => { await logout(); navigate('/') }
   const isDemo = settings?.demo_mode ?? !user?.has_api_keys
+  // Per-broker running status helpers
+  const rhStatus = botStatus?.robinhood ?? null
+  const capStatus = botStatus?.capital ?? null
+  const anyBotRunning = (botStatus?.running) || rhStatus?.running || capStatus?.running || false
   // Sanitize bot signals — hide strategy details from users
   const sanitizeSignal = (signal: string | null | undefined): string => {
     if (!signal) return ''
@@ -721,10 +855,12 @@ export function Dashboard() {
     return 'Scanning for opportunities...'
   }
 
-  const currentPnl = botStatus?.in_trade && botStatus.entry_price && botStatus.entry_price > 0 && livePrice
-    ? botStatus.trade_side === 'buy'
-      ? ((livePrice - botStatus.entry_price) / botStatus.entry_price) * 100
-      : ((botStatus.entry_price - livePrice) / botStatus.entry_price) * 100
+  // Use robinhood primary status for the live price PnL display (RH trades BTC etc.)
+  const _primaryStatus = rhStatus?.in_trade ? rhStatus : capStatus
+  const currentPnl = _primaryStatus?.in_trade && _primaryStatus.entry_price && _primaryStatus.entry_price > 0 && livePrice
+    ? _primaryStatus.trade_side === 'buy'
+      ? ((livePrice - _primaryStatus.entry_price) / _primaryStatus.entry_price) * 100
+      : ((_primaryStatus.entry_price - livePrice) / _primaryStatus.entry_price) * 100
     : null
 
   // ── Render ──────────────────────────────────────────────────────────────────
@@ -740,10 +876,12 @@ export function Dashboard() {
             <span className="text-xl">&#9889;</span>
             <span className="font-bold text-sm" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>Nalo.Ai</span>
             {isPremium && <span className="text-xs px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-400 border border-purple-500/30 font-medium">PRO</span>}
-            {isDemo
-              ? <span className="text-xs px-2 py-0.5 rounded-full bg-warning/20 text-warning border border-warning/30 font-medium">DEMO</span>
-              : botStatus?.running && !botStatus.demo_mode
+            {anyBotRunning
+              ? ((rhStatus?.running && !rhStatus.demo_mode) || (capStatus?.running && !capStatus.demo_mode))
                 ? <span className="text-xs px-2 py-0.5 rounded-full bg-profit/20 text-profit border border-profit/30 font-medium">LIVE</span>
+                : <span className="text-xs px-2 py-0.5 rounded-full bg-warning/20 text-warning border border-warning/30 font-medium">DEMO</span>
+              : isDemo
+                ? <span className="text-xs px-2 py-0.5 rounded-full bg-warning/20 text-warning border border-warning/30 font-medium">DEMO</span>
                 : null}
           </div>
           <div className="flex items-center gap-3 text-sm font-mono">
@@ -776,26 +914,26 @@ export function Dashboard() {
         {activeTab === 'dashboard' && (
           <>
             {/* Mode Banner */}
-            {isDemo ? (
+            {!anyBotRunning ? (
               <div className="px-5 py-3 rounded-xl bg-warning/10 border border-warning/30 flex items-start gap-3">
                 <span className="text-xl mt-0.5">&#127917;</span>
                 <div>
-                  <p className="text-sm font-semibold text-warning">Demo Mode Active</p>
-                  <p className="text-xs text-muted mt-0.5">Simulated trades with virtual balance. No real money at risk. Add your Robinhood API keys in Settings to trade for real.</p>
+                  <p className="text-sm font-semibold text-warning">No Bots Running</p>
+                  <p className="text-xs text-muted mt-0.5">Start Robinhood (crypto) or Capital.com (GOLD/US100) below. Both can run at the same time.</p>
                 </div>
               </div>
-            ) : botStatus?.running && !botStatus.demo_mode ? (
+            ) : (rhStatus?.running && !rhStatus.demo_mode) || (capStatus?.running && !capStatus.demo_mode) ? (
               <div className="px-5 py-3 rounded-xl bg-profit/10 border border-profit/30 flex items-start gap-3">
                 <span className="text-xl mt-0.5">&#128176;</span>
                 <div>
                   <p className="text-sm font-semibold text-profit">Live Trading Active</p>
-                  <p className="text-xs text-muted mt-0.5">Real orders are being placed on Robinhood. Your capital is at risk.</p>
+                  <p className="text-xs text-muted mt-0.5">Real orders are being placed. Your capital is at risk.</p>
                 </div>
               </div>
             ) : null}
 
             {/* Key Invalid Warning */}
-            {botStatus?.key_invalid && (
+            {rhStatus?.key_invalid && (
               <div className="flex items-start gap-3 p-4 rounded-2xl bg-loss/10 border border-loss/30">
                 <span className="text-loss text-lg flex-shrink-0">&#9888;</span>
                 <div className="flex-1 min-w-0">
@@ -807,71 +945,73 @@ export function Dashboard() {
             )}
 
             {/* Risk Pause Warning */}
-            {botStatus?.risk?.is_paused && (
+            {(_primaryStatus?.risk?.is_paused) && (
               <div className="flex items-start gap-3 p-4 rounded-2xl bg-warning/10 border border-warning/30">
                 <span className="text-warning text-lg flex-shrink-0">&#9888;&#65039;</span>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-semibold text-warning">Trading Paused by Risk Manager</p>
-                  <p className="text-xs text-muted mt-0.5">{botStatus.risk.pause_reason}</p>
+                  <p className="text-xs text-muted mt-0.5">{_primaryStatus.risk!.pause_reason}</p>
                 </div>
                 <button onClick={resumeTrading} className="flex-shrink-0 text-xs px-3 py-1.5 rounded-lg bg-accent/20 border border-accent/30 text-accent hover:bg-accent/30 transition-colors font-medium">Resume Trading</button>
               </div>
             )}
 
-            {/* Bot Control */}
-            <div className="bg-card border border-border rounded-2xl p-5">
-              <div className="flex flex-col lg:flex-row lg:items-center gap-5">
-                <div className="flex items-center gap-4 flex-shrink-0">
-                  <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${botStatus?.running ? 'pulse-dot bg-profit' : 'bg-muted'}`} />
-                  <div>
-                    <span className="font-semibold text-sm">
-                      {botStatus?.running ? (botStatus.demo_mode ? 'Running \u2014 Demo' : 'Running \u2014 LIVE') : 'Bot is stopped'}
-                    </span>
-                    {botStatus?.running && botStatus.demo_mode && liveDemoBalance != null && (
-                      <span className="text-xs text-warning ml-2 font-mono">Virtual: ${liveDemoBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                    )}
-                    {botStatus?.last_signal && <p className="text-xs text-muted mt-0.5 truncate max-w-xs">{sanitizeSignal(botStatus.last_signal)}</p>}
-                  </div>
-                  <div className="flex items-center gap-2 ml-2">
-                    {botStatus?.running ? (
-                      <button onClick={stopBot} disabled={botLoading} className="px-4 py-1.5 rounded-lg bg-loss/20 border border-loss/40 text-loss text-xs font-semibold hover:bg-loss/30 transition-colors disabled:opacity-50">{botLoading ? '...' : 'Stop'}</button>
-                    ) : (
-                      <>
-                        <button onClick={() => startBot('demo')} disabled={botLoading} className="px-4 py-1.5 rounded-lg bg-warning/15 border border-warning/40 text-warning text-xs font-semibold hover:bg-warning/25 transition-colors disabled:opacity-50">{botLoading ? '...' : 'Start Demo'}</button>
-                        <button onClick={() => startBot('live')} disabled={botLoading || !settings?.has_api_keys || botStatus?.key_invalid} title={!settings?.has_api_keys ? 'Add API key first' : botStatus?.key_invalid ? 'API key invalid' : 'Start live'} className="px-4 py-1.5 rounded-lg bg-profit/15 border border-profit/40 text-profit text-xs font-semibold hover:bg-profit/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">{botLoading ? '...' : 'Start Live'}</button>
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                {/* Active trade details */}
-                {botStatus?.in_trade && botStatus.entry_price && (
-                  <div className="flex-1 p-4 rounded-xl bg-elevated border border-border">
-                    <div className="flex flex-wrap gap-4 items-center">
-                      {[
-                        { label: 'Side', badge: true, val: botStatus.trade_side },
-                        { label: 'Entry', value: `$${(botStatus.entry_price ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` },
-                        ...(livePrice ? [{ label: 'Current', value: `$${livePrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}` }] : []),
-                        ...(currentPnl !== null ? [{ label: 'Live P&L', pnl: true, val: currentPnl }] : []),
-                        ...(botStatus.trail_stop ? [{ label: 'Trail Stop', value: `$${botStatus.trail_stop.toFixed(2)}`, dimmed: true }] : []),
-                        { label: 'Qty', value: `${botStatus.position_size ?? '?'}` },
-                      ].map((item, i) => (
-                        <div key={i}>
-                          <p className="text-xs text-muted">{item.label}</p>
-                          {'badge' in item && item.badge ? (
-                            <span className={`text-xs font-bold px-2 py-0.5 rounded ${item.val === 'buy' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>{(item.val as string).toUpperCase()}</span>
-                          ) : 'pnl' in item && item.pnl ? (
-                            <p className={`font-mono font-bold text-sm ${(item.val as number) >= 0 ? 'text-profit' : 'text-loss'}`}>{(item.val as number) >= 0 ? '+' : ''}{(item.val as number).toFixed(2)}%</p>
-                          ) : (
-                            <p className={`font-mono text-sm ${'dimmed' in item && item.dimmed ? 'text-warning' : 'text-white'}`}>{item.value}</p>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
+            {/* Bot Controls — two cards side by side */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <BotCard
+                broker="robinhood"
+                label="Robinhood Crypto"
+                icon="&#129689;"
+                symbols={['BTC', 'ETH', 'SOL', 'DOGE']}
+                status={rhStatus}
+                loading={botLoadingRh}
+                hasKeys={settings?.has_api_keys ?? false}
+                onStart={(mode) => startBot('robinhood', mode)}
+                onStop={() => stopBot('robinhood')}
+                balance={liveDemoBalance}
+                balanceLabel="Robinhood Demo"
+              />
+              <BotCard
+                broker="capital"
+                label="Capital.com CFDs"
+                icon="&#128200;"
+                symbols={['GOLD', 'US100']}
+                status={capStatus}
+                loading={botLoadingCap}
+                hasKeys={settings?.has_capital_keys ?? false}
+                onStart={(mode) => startBot('capital', mode)}
+                onStop={() => stopBot('capital')}
+                balance={capitalDemoBalance ?? settings?.capital_demo_balance ?? 10000}
+                balanceLabel="Capital Demo"
+              />
             </div>
+
+            {/* Active trade details (primary in-trade status) */}
+            {_primaryStatus?.in_trade && _primaryStatus.entry_price && (
+              <div className="p-4 rounded-xl bg-elevated border border-border">
+                <div className="flex flex-wrap gap-4 items-center">
+                  {[
+                    { label: 'Side', badge: true, val: _primaryStatus.trade_side },
+                    { label: 'Entry', value: `$${(_primaryStatus.entry_price ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` },
+                    ...(livePrice ? [{ label: 'Current', value: `$${livePrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}` }] : []),
+                    ...(currentPnl !== null ? [{ label: 'Live P&L', pnl: true, val: currentPnl }] : []),
+                    ...(_primaryStatus.trail_stop ? [{ label: 'Trail Stop', value: `$${_primaryStatus.trail_stop.toFixed(2)}`, dimmed: true }] : []),
+                    { label: 'Qty', value: `${_primaryStatus.position_size ?? '?'}` },
+                  ].map((item, i) => (
+                    <div key={i}>
+                      <p className="text-xs text-muted">{item.label}</p>
+                      {'badge' in item && item.badge ? (
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded ${item.val === 'buy' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>{(item.val as string).toUpperCase()}</span>
+                      ) : 'pnl' in item && item.pnl ? (
+                        <p className={`font-mono font-bold text-sm ${(item.val as number) >= 0 ? 'text-profit' : 'text-loss'}`}>{(item.val as number) >= 0 ? '+' : ''}{(item.val as number).toFixed(2)}%</p>
+                      ) : (
+                        <p className={`font-mono text-sm ${'dimmed' in item && item.dimmed ? 'text-warning' : 'text-white'}`}>{item.value}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Indicators hidden — strategy internals */}
 
@@ -893,8 +1033,8 @@ export function Dashboard() {
                       <YAxis tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} width={72} domain={['auto', 'auto']} tickFormatter={(v: number) => `$${v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0)}`} />
                       <Tooltip contentStyle={{ backgroundColor: '#1A1B23', border: '1px solid #2A2B35', borderRadius: 8, fontSize: 12 }} />
                       <Area type="monotone" dataKey="price" stroke="#6366F1" fill="url(#priceGrad)" strokeWidth={2} dot={false} />
-                      {botStatus?.entry_price && <ReferenceLine y={botStatus.entry_price} stroke="#10B981" strokeDasharray="3 3" label={{ value: 'Entry', fill: '#10B981', fontSize: 10 }} />}
-                      {botStatus?.trail_stop && <ReferenceLine y={botStatus.trail_stop} stroke="#EF4444" strokeDasharray="3 3" label={{ value: 'Trail', fill: '#EF4444', fontSize: 10 }} />}
+                      {_primaryStatus?.entry_price && <ReferenceLine y={_primaryStatus.entry_price} stroke="#10B981" strokeDasharray="3 3" label={{ value: 'Entry', fill: '#10B981', fontSize: 10 }} />}
+                      {_primaryStatus?.trail_stop && <ReferenceLine y={_primaryStatus.trail_stop} stroke="#EF4444" strokeDasharray="3 3" label={{ value: 'Trail', fill: '#EF4444', fontSize: 10 }} />}
                     </ComposedChart>
                   </ResponsiveContainer>
                 ) : (
@@ -1014,14 +1154,14 @@ export function Dashboard() {
                 </div>
 
                 {/* Risk Status */}
-                {botStatus?.risk && (
+                {_primaryStatus?.risk && (
                   <div className="mt-4 pt-4 border-t border-border">
                     <p className="text-xs font-semibold text-muted mb-2 uppercase tracking-wider">Risk Manager</p>
                     <div className="space-y-1.5 text-xs">
-                      <div className="flex justify-between"><span className="text-muted">Daily P&L</span><span className={botStatus.risk.daily_pnl >= 0 ? 'text-profit' : 'text-loss'}>${botStatus.risk.daily_pnl.toFixed(2)}</span></div>
-                      <div className="flex justify-between"><span className="text-muted">Drawdown</span><span className={botStatus.risk.daily_drawdown_pct > 3 ? 'text-warning' : 'text-muted'}>{botStatus.risk.daily_drawdown_pct.toFixed(1)}% / {botStatus.risk.max_drawdown_pct}%</span></div>
-                      <div className="flex justify-between"><span className="text-muted">Recent Stops</span><span>{botStatus.risk.recent_stops} / {botStatus.risk.max_stops}</span></div>
-                      {botStatus.risk.cooldown_remaining > 0 && <div className="flex justify-between"><span className="text-muted">Cooldown</span><span className="text-warning">{botStatus.risk.cooldown_remaining} ticks</span></div>}
+                      <div className="flex justify-between"><span className="text-muted">Daily P&L</span><span className={_primaryStatus.risk.daily_pnl >= 0 ? 'text-profit' : 'text-loss'}>${_primaryStatus.risk.daily_pnl.toFixed(2)}</span></div>
+                      <div className="flex justify-between"><span className="text-muted">Drawdown</span><span className={_primaryStatus.risk.daily_drawdown_pct > 3 ? 'text-warning' : 'text-muted'}>{_primaryStatus.risk.daily_drawdown_pct.toFixed(1)}% / {_primaryStatus.risk.max_drawdown_pct}%</span></div>
+                      <div className="flex justify-between"><span className="text-muted">Recent Stops</span><span>{_primaryStatus.risk.recent_stops} / {_primaryStatus.risk.max_stops}</span></div>
+                      {_primaryStatus.risk.cooldown_remaining > 0 && <div className="flex justify-between"><span className="text-muted">Cooldown</span><span className="text-warning">{_primaryStatus.risk.cooldown_remaining} ticks</span></div>}
                     </div>
                   </div>
                 )}
@@ -1162,12 +1302,24 @@ export function Dashboard() {
         {/* ═══════════════ TRADES TAB ═══════════════ */}
         {activeTab === 'trades' && (
           <div className="bg-card border border-border rounded-2xl p-5">
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-4 gap-2">
               <h2 className="text-xs font-semibold text-muted uppercase tracking-wider">Trade History</h2>
-              <div className="flex gap-1 bg-elevated rounded-lg p-0.5">
-                {(['all', 'live', 'demo'] as const).map(f => (
-                  <button key={f} onClick={() => setTradeFilter(f)} className={`px-3 py-1 rounded-md text-xs font-semibold transition-colors ${tradeFilter === f ? f === 'live' ? 'bg-profit/20 text-profit' : f === 'demo' ? 'bg-warning/20 text-warning' : 'bg-accent/20 text-accent' : 'text-muted hover:text-white'}`}>{f === 'all' ? 'All' : f === 'live' ? 'Live' : 'Demo'}</button>
-                ))}
+              <div className="flex flex-wrap gap-2">
+                {/* Broker filter */}
+                <div className="flex gap-1 bg-elevated rounded-lg p-0.5">
+                  {(['all', 'robinhood', 'capital'] as const).map(b => (
+                    <button key={b} onClick={() => { setBrokerFilter(b); loadData() }}
+                      className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${brokerFilter === b ? 'bg-accent/20 text-accent' : 'text-muted hover:text-white'}`}>
+                      {b === 'all' ? 'All' : b === 'robinhood' ? 'Robinhood' : 'Capital'}
+                    </button>
+                  ))}
+                </div>
+                {/* Mode filter */}
+                <div className="flex gap-1 bg-elevated rounded-lg p-0.5">
+                  {(['all', 'live', 'demo'] as const).map(f => (
+                    <button key={f} onClick={() => setTradeFilter(f)} className={`px-3 py-1 rounded-md text-xs font-semibold transition-colors ${tradeFilter === f ? f === 'live' ? 'bg-profit/20 text-profit' : f === 'demo' ? 'bg-warning/20 text-warning' : 'bg-accent/20 text-accent' : 'text-muted hover:text-white'}`}>{f === 'all' ? 'All' : f === 'live' ? 'Live' : 'Demo'}</button>
+                  ))}
+                </div>
               </div>
             </div>
             {trades.length === 0 ? (

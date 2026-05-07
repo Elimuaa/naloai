@@ -32,7 +32,9 @@ async def check_bot_loops() -> dict:
     stuck_count = 0
 
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(User).where(User.bot_active == True))
+        result = await db.execute(
+            select(User).where((User.bot_active == True) | (User.bot_active_capital == True))
+        )
         active_users = result.scalars().all()
 
     for user in active_users:

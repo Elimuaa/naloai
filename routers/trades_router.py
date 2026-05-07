@@ -49,10 +49,14 @@ def serialize_trade(t: Trade) -> dict:
     }
 
 
+CAPITAL_SYMS = ("GOLD", "US100")
+
+
 @router.get("")
 async def get_trades(
     limit: int = 50,
     mode: str = "all",  # "all", "live", "demo"
+    broker: str = "all",  # "all", "robinhood", "capital"
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -62,6 +66,11 @@ async def get_trades(
         query = query.where(Trade.is_demo == False)
     elif mode == "demo":
         query = query.where(Trade.is_demo == True)
+    broker = broker.lower().strip()
+    if broker == "capital":
+        query = query.where(Trade.symbol.in_(CAPITAL_SYMS))
+    elif broker == "robinhood":
+        query = query.where(Trade.symbol.not_in(CAPITAL_SYMS))
     result = await db.execute(query.order_by(desc(Trade.opened_at)).limit(limit))
     trades = result.scalars().all()
     return [serialize_trade(t) for t in trades]
@@ -69,19 +78,24 @@ async def get_trades(
 
 @router.get("/open")
 async def get_open_trades(
+    broker: str = "all",  # "all", "robinhood", "capital"
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    result = await db.execute(
-        select(Trade)
-        .where(Trade.user_id == current_user.id, Trade.state == "open")
-    )
+    query = select(Trade).where(Trade.user_id == current_user.id, Trade.state == "open")
+    broker = broker.lower().strip()
+    if broker == "capital":
+        query = query.where(Trade.symbol.in_(CAPITAL_SYMS))
+    elif broker == "robinhood":
+        query = query.where(Trade.symbol.not_in(CAPITAL_SYMS))
+    result = await db.execute(query)
     return [serialize_trade(t) for t in result.scalars().all()]
 
 
 @router.get("/stats")
 async def get_stats(
     mode: str = "all",
+    broker: str = "all",  # "all", "robinhood", "capital"
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -94,6 +108,11 @@ async def get_stats(
         query = query.where(Trade.is_demo == False)
     elif mode == "demo":
         query = query.where(Trade.is_demo == True)
+    broker = broker.lower().strip()
+    if broker == "capital":
+        query = query.where(Trade.symbol.in_(CAPITAL_SYMS))
+    elif broker == "robinhood":
+        query = query.where(Trade.symbol.not_in(CAPITAL_SYMS))
     result = await db.execute(query)
     trades = result.scalars().all()
 

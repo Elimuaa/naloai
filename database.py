@@ -53,6 +53,8 @@ class User(Base):
 
     # Demo balance — user-configurable starting balance for paper trading
     demo_balance: Mapped[float] = mapped_column(Float, default=10000.0)
+    capital_demo_balance: Mapped[float] = mapped_column(Float, default=10000.0)
+    bot_active_capital: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Advanced strategy settings
     use_rsi_filter: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -289,6 +291,9 @@ async def init_db():
             # Partial profit accounting
             "ALTER TABLE trades ADD COLUMN partial_pnl REAL DEFAULT 0.0",
             "ALTER TABLE trades ADD COLUMN initial_quantity REAL DEFAULT 0",
+            # Multi-broker independent bot columns
+            "ALTER TABLE users ADD COLUMN capital_demo_balance REAL DEFAULT 10000.0",
+            "ALTER TABLE users ADD COLUMN bot_active_capital INTEGER DEFAULT 0",
             # Strategy memory composite index — speeds up bucket lookups
             ("CREATE INDEX IF NOT EXISTS ix_strategy_memory_bucket "
              "ON strategy_memory (symbol, side, hour_utc, regime, signal_strength_bucket, z_bucket, user_id)"),
