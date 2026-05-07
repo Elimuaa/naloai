@@ -223,22 +223,24 @@ _risk_managers: dict[str, RiskManager] = {}
 _risk_state_loaded: set[str] = set()  # user_ids whose risk state has been hydrated from DB
 
 
-async def _load_risk_state(user_id: str, rm: RiskManager) -> None:
+async def _load_risk_state(user_id: str, rm: RiskManager, broker: str = 'robinhood') -> None:
     """One-shot hydrate of RiskManager from the persisted snapshot.
 
-    Called once per process per user. Without this, `daily_pnl`, the Kelly
-    rolling window, and the stop-loss cooldown all reset on every redeploy —
-    which can re-trigger full-size mode after the day's target was already hit
-    or bypass cooldown right after a stop. Both are profitability leaks.
+    Keyed by '{user_id}:{broker}' so Robinhood and Capital.com load independent
+    snapshots. Called once per process per user+broker pair.
     """
-    if user_id in _risk_state_loaded:
+    load_key = f"{user_id}:{broker}"
+    if load_key in _risk_state_loaded:
         return
-    _risk_state_loaded.add(user_id)
+    _risk_state_loaded.add(load_key)
     try:
         from database import RiskState
+        # Store risk state with composite key: f"{user_id}:{broker}" for Capital,
+        # plain user_id for Robinhood (backward compat with existing rows).
+        state_key = f"{user_id}:{broker}" if broker != 'robinhood' else user_id
         async with AsyncSessionLocal() as db:
             row = (await db.execute(
-                select(RiskState).where(RiskState.user_id == user_id)
+                select(RiskState).where(RiskState.user_id == state_key)
             )).scalar_one_or_none()
         if row is None:
             return
@@ -255,23 +257,25 @@ async def _load_risk_state(user_id: str, rm: RiskManager) -> None:
         }
         rm.restore_from_dict(snap)
     except Exception as e:
-        logger.error(f"Risk state load failed for {user_id}: {e}", exc_info=True)
+        logger.error(f"Risk state load failed for {user_id}/{broker}: {e}", exc_info=True)
 
 
-async def _persist_risk_state(user_id: str, rm: RiskManager) -> None:
+async def _persist_risk_state(user_id: str, rm: RiskManager, broker: str = 'robinhood') -> None:
     """Write the RiskManager snapshot to DB. Called after every trade close."""
     try:
         from database import RiskState
         import json as _json
         snap = rm.to_persisted_dict()
+        # Composite key for Capital.com; plain user_id for Robinhood (backward compat)
+        state_key = f"{user_id}:{broker}" if broker != 'robinhood' else user_id
         async with AsyncSessionLocal() as db:
             existing = (await db.execute(
-                select(RiskState).where(RiskState.user_id == user_id)
+                select(RiskState).where(RiskState.user_id == state_key)
             )).scalar_one_or_none()
             now = datetime.now(timezone.utc)
             if existing is None:
                 db.add(RiskState(
-                    user_id=user_id,
+                    user_id=state_key,
                     daily_pnl=snap["daily_pnl"],
                     daily_starting_balance=snap["daily_starting_balance"],
                     daily_reset_date=snap["daily_reset_date"],
@@ -294,12 +298,18 @@ async def _persist_risk_state(user_id: str, rm: RiskManager) -> None:
                 existing.updated_at = now
             await db.commit()
     except Exception as e:
-        logger.error(f"Risk state persist failed for {user_id}: {e}", exc_info=True)
+        logger.error(f"Risk state persist failed for {user_id}/{broker}: {e}", exc_info=True)
 
 
-def _get_risk_manager(user: User) -> RiskManager:
-    """Get or create a risk manager for a user. Always syncs live settings from DB."""
-    rm = _risk_managers.get(user.id)
+def _get_risk_manager(user: User, broker: str = 'robinhood') -> RiskManager:
+    """Get or create a risk manager for a user+broker pair.
+
+    Keyed by '{user_id}:{broker}' so Robinhood and Capital.com have completely
+    independent drawdown tracking, stop-loss guards, and cooldowns. A pause on
+    Robinhood (e.g. 8 crypto stop-losses) must NOT pause the Capital.com bot.
+    """
+    rm_key = f"{user.id}:{broker}"
+    rm = _risk_managers.get(rm_key)
     if rm is None:
         rm = RiskManager(
             max_drawdown_pct=getattr(user, 'max_drawdown_pct', 8.0) or 8.0,
@@ -308,7 +318,7 @@ def _get_risk_manager(user: User) -> RiskManager:
             max_exposure_pct=getattr(user, 'max_exposure_pct', 40.0) or 40.0,
             risk_per_trade_pct=getattr(user, 'risk_per_trade_pct', 2.0) or 2.0,
         )
-        _risk_managers[user.id] = rm
+        _risk_managers[rm_key] = rm
     else:
         # Sync settings every tick so admin changes take effect immediately
         rm.max_drawdown_pct = getattr(user, 'max_drawdown_pct', 8.0) or 8.0
@@ -416,11 +426,23 @@ async def start_bot(user_id: str, force_demo: bool = False, broker: str = 'robin
         # the loop idles cheaply.
         symbols_to_run = ["BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD"]
 
+    # ── Write active flag BEFORE spawning tasks ─────────────────────────────────
+    # CRITICAL: asyncio tasks start executing on the very next event-loop tick
+    # after create_task(). If the DB write happens after task creation, the loop's
+    # first _get_user_config read sees bot_active_capital=False → immediately exits.
+    async with AsyncSessionLocal() as db:
+        if broker == 'capital':
+            await db.execute(update(User).where(User.id == user_id).values(bot_active_capital=True))
+        else:
+            await db.execute(update(User).where(User.id == user_id).values(bot_active=True))
+        await db.commit()
+
     # Hydrate the RiskManager from the persisted snapshot ONCE before any loop fires.
-    # This protects daily_pnl, Kelly history, and stop-loss cooldowns across restarts.
+    # Use broker-scoped key so Robinhood and Capital.com have independent risk state —
+    # Robinhood's stop-loss pause must never bleed into the Capital.com bot.
     if user is not None:
-        _rm_for_load = _get_risk_manager(user)
-        await _load_risk_state(user_id, _rm_for_load)
+        _rm_for_load = _get_risk_manager(user, broker=broker)
+        await _load_risk_state(user_id, _rm_for_load, broker=broker)
 
     for sym in symbols_to_run:
         _state_key = f"{user_id}:{sym}"
@@ -454,21 +476,12 @@ async def start_bot(user_id: str, force_demo: bool = False, broker: str = 'robin
                 sign = 1.0 if s2_side == "buy" else -1.0
                 client_now._holdings[sym] = client_now._holdings.get(sym, 0) + sign * s2_qty
                 if hasattr(client_now, '_avg_entry') and s2.get("entry_price"):
-                    # Don't overwrite primary basis if already set; only set if missing.
                     client_now._avg_entry.setdefault(sym, float(s2["entry_price"]))
                 logger.info(f"Restored second-slot holdings for {user_id}/{sym}: {sign:+.0f}*{s2_qty:.6f} (side={s2_side})")
 
         task = asyncio.create_task(_bot_loop(user_id, sym), name=f"bot-{user_id}-{sym}")
         _bot_tasks[_state_key] = task
-        logger.info(f"Launched bot loop for {user_id} symbol={sym}")
-
-    # Persist the active flag for the correct broker
-    async with AsyncSessionLocal() as db:
-        if broker == 'capital':
-            await db.execute(update(User).where(User.id == user_id).values(bot_active_capital=True))
-        else:
-            await db.execute(update(User).where(User.id == user_id).values(bot_active=True))
-        await db.commit()
+        logger.info(f"Launched bot loop for {user_id} symbol={sym} broker={broker}")
 
     return {"status": "started", "symbols": symbols_to_run}
 
@@ -678,7 +691,9 @@ async def stop_bot(user_id: str, broker: str = 'all'):
 
 def get_bot_status(user_id: str) -> dict:
     """Return per-broker status dict: {"robinhood": {...}, "capital": {...}}."""
-    risk_mgr = _risk_managers.get(user_id)
+    # Each broker has its own risk manager — never mix Robinhood/Capital state
+    _rh_rm = _risk_managers.get(f"{user_id}:robinhood") or _risk_managers.get(user_id)
+    _cap_rm = _risk_managers.get(f"{user_id}:capital")
 
     result: dict = {
         "robinhood": {"running": False, "symbols": []},
@@ -692,6 +707,7 @@ def get_bot_status(user_id: str) -> dict:
         broker = _broker_for_symbol(sym)
         task = _bot_tasks.get(key)
         is_running = task is not None and not task.done()
+        rm = _cap_rm if broker == 'capital' else _rh_rm
 
         broker_status = result[broker]
         broker_status["running"] = broker_status["running"] or is_running
@@ -711,7 +727,7 @@ def get_bot_status(user_id: str) -> dict:
                 "key_invalid": state.key_invalid,
                 "indicators": state.indicators,
                 "position_size": state.current_quantity,
-                "risk": risk_mgr.get_status() if risk_mgr else None,
+                "risk": rm.get_status() if rm else None,
             })
 
     # Also expose a flattened top-level view for backward compat with internal callers
@@ -1077,15 +1093,18 @@ async def _bot_loop(user_id: str, symbol: str):
                 await asyncio.sleep(30)
                 continue
 
-            # Initialize risk manager with user settings
-            risk_mgr = _get_risk_manager(user)
+            # Initialize broker-scoped risk manager — Capital.com and Robinhood
+            # have independent drawdown/stop tracking so a Robinhood pause never
+            # blocks the Capital.com bot and vice-versa.
+            _sym_broker = _broker_for_symbol(symbol)
+            risk_mgr = _get_risk_manager(user, broker=_sym_broker)
             balance = client.balance if hasattr(client, 'balance') else (user.demo_balance or 10000.0)
             _prev_reset_date = risk_mgr.daily_reset_date
             risk_mgr.reset_daily(balance)
             # If a UTC-day rollover just happened, flush the fresh snapshot to DB so
             # a restart at 00:01 doesn't show stale yesterday counters in the UI.
             if risk_mgr.daily_reset_date != _prev_reset_date:
-                _rpr = asyncio.create_task(_persist_risk_state(user_id, risk_mgr))
+                _rpr = asyncio.create_task(_persist_risk_state(user_id, risk_mgr, broker=_sym_broker))
                 _background_tasks.add(_rpr); _rpr.add_done_callback(_background_tasks.discard)
 
             # symbol is passed as parameter — do not override with user.trading_symbol
@@ -1368,7 +1387,7 @@ async def _bot_loop(user_id: str, symbol: str):
                             risk_mgr.daily_pnl += partial_pnl   # book the locked profit
                             state.partial_pnl_booked = partial_pnl  # remember for final-close accounting
                             # Persist updated daily_pnl — partial gains must survive a restart
-                            _rpp = asyncio.create_task(_persist_risk_state(user_id, risk_mgr))
+                            _rpp = asyncio.create_task(_persist_risk_state(user_id, risk_mgr, broker=_sym_broker))
                             _background_tasks.add(_rpp); _rpp.add_done_callback(_background_tasks.discard)
 
                             # Reduce remaining quantity
@@ -1552,7 +1571,7 @@ async def _bot_loop(user_id: str, symbol: str):
                     # but Kelly tracker uses TOTAL to correctly grade the trade.
                     risk_mgr.record_trade_close(close_leg_pnl, exit_reason, total_pnl=pnl)
                     # Persist the snapshot — survives redeploys (daily_pnl, Kelly, cooldowns)
-                    _rp = asyncio.create_task(_persist_risk_state(user_id, risk_mgr))
+                    _rp = asyncio.create_task(_persist_risk_state(user_id, risk_mgr, broker=_sym_broker))
                     _background_tasks.add(_rp); _rp.add_done_callback(_background_tasks.discard)
 
                     # Track consecutive losses/wins and cooldown
@@ -1790,7 +1809,7 @@ async def _bot_loop(user_id: str, symbol: str):
                         symbol=symbol, quantity=qty2,
                     )
                     risk_mgr.record_trade_close(_pnl2, exit_reason2, total_pnl=_pnl2)
-                    _rp2 = asyncio.create_task(_persist_risk_state(user_id, risk_mgr))
+                    _rp2 = asyncio.create_task(_persist_risk_state(user_id, risk_mgr, broker=_sym_broker))
                     _background_tasks.add(_rp2); _rp2.add_done_callback(_background_tasks.discard)
 
                     if _pnl2 < 0:
