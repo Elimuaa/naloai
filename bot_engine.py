@@ -88,7 +88,24 @@ def _get_client(user: User, force_demo: bool = False):
         logger.info(f"force_demo=True for user {user.id} (broker={broker}), using mock")
 
     # ── Demo/mock fallback — pick matching mock client ──
+    # For Capital.com, prefer the REAL Capital.com demo API when creds exist:
+    # same API key + email + password, just hits demo-api-capital.backend-capital.com.
+    # Falls back to MockCapitalClient only if Capital.com creds are missing.
     if broker == 'capital':
+        if user.capital_api_key and user.capital_identifier:
+            try:
+                from capital_client import CapitalComClient
+                client = CapitalComClient(
+                    api_key=user.capital_api_key,
+                    identifier=user.capital_identifier,
+                    password=user.capital_password or "",
+                    demo=True,  # real Capital.com demo account
+                )
+                logger.info(f"Using REAL Capital.com DEMO API for user {user.id}")
+                _client_cache[cache_key] = client
+                return client
+            except Exception as e:
+                logger.error(f"Capital.com demo client failed for {user.id}, falling back to mock: {e}")
         from mock_capital_client import MockCapitalClient
         client = MockCapitalClient(symbol=user.trading_symbol, balance=user.demo_balance or 10000.0)
     elif broker == 'tradovate':
