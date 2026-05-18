@@ -206,7 +206,7 @@ function BotCard({ broker, label, icon, symbols, status, loading, hasKeys, onSta
           <span className="text-lg">{icon}</span>
           <div>
             <p className="font-semibold text-sm text-white">{label}</p>
-            <p className="text-xs text-muted">{symbols.join(' \u00b7 ')}</p>
+            <p className="text-xs text-muted">{symbols.join(' · ')}</p>
           </div>
         </div>
         <div className={`px-2 py-1 rounded-full text-xs font-bold border ${
@@ -220,7 +220,7 @@ function BotCard({ broker, label, icon, symbols, status, loading, hasKeys, onSta
       <div className="rounded-xl bg-surface/60 px-3 py-2 flex items-center justify-between" style={{ backgroundColor: 'rgba(255,255,255,0.04)' }}>
         <span className="text-xs text-muted">{balanceLabel}</span>
         <span className="font-mono font-bold text-sm text-white">
-          {balance != null ? `$${balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '\u2014'}
+          {balance != null ? `$${balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}
         </span>
       </div>
 
@@ -562,7 +562,7 @@ export function Dashboard() {
           addFeed('error', `Risk Manager: ${d.message}`, 'text-warning')
           loadData()
         } else if (d.type === 'calibration_applied') {
-          addFeed('ai', `Pro: Strategy calibrated \u2014 ${d.summary}`, 'text-purple-400')
+          addFeed('ai', `Pro: Strategy calibrated — ${d.summary}`, 'text-purple-400')
           loadData()
         } else if (d.type === 'premium_activated') {
           setIsPremium(true)
@@ -865,318 +865,249 @@ export function Dashboard() {
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
+  const totalBalance = (liveDemoBalance ?? 10000) + (capitalDemoBalance ?? settings?.capital_demo_balance ?? 10000)
+  const rhBalance = liveDemoBalance ?? settings?.demo_balance ?? 10000
+  const capBalance = capitalDemoBalance ?? settings?.capital_demo_balance ?? 10000
+
   return (
-    <div className="min-h-screen bg-dark text-white">
+    <div className="min-h-screen bg-dark text-white flex flex-col">
       {toast && <Toast msg={toast.msg} ok={toast.ok} />}
 
-      {/* Top Bar */}
+      {/* ── Header ── */}
       <header className="sticky top-0 z-40 border-b border-border bg-dark/95 backdrop-blur-md">
-        <div className="max-w-7xl mx-auto px-4 h-14 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <span className="text-xl">&#9889;</span>
-            <span className="font-bold text-sm" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>Nalo.Ai</span>
-            {isPremium && <span className="text-xs px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-400 border border-purple-500/30 font-medium">PRO</span>}
-            {anyBotRunning
-              ? ((rhStatus?.running && !rhStatus.demo_mode) || (capStatus?.running && !capStatus.demo_mode))
-                ? <span className="text-xs px-2 py-0.5 rounded-full bg-profit/20 text-profit border border-profit/30 font-medium">LIVE</span>
-                : <span className="text-xs px-2 py-0.5 rounded-full bg-warning/20 text-warning border border-warning/30 font-medium">DEMO</span>
-              : isDemo
-                ? <span className="text-xs px-2 py-0.5 rounded-full bg-warning/20 text-warning border border-warning/30 font-medium">DEMO</span>
-                : null}
+        <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between gap-3">
+          {/* Logo */}
+          <div className="flex items-center gap-2">
+            <span className="text-lg">⚡</span>
+            <span className="font-bold text-base tracking-tight">Nalo.Ai</span>
+            {isPremium && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-400 border border-purple-500/30 font-semibold">PRO</span>
+            )}
           </div>
-          <div className="flex items-center gap-3 text-sm font-mono">
-            <span className="text-muted text-xs hidden sm:block">{settings?.trading_symbol ?? 'BTC-USD'}</span>
-            {livePrice ? <span className="text-white font-semibold">${livePrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span> : <span className="text-muted text-xs animate-pulse">fetching...</span>}
-            {/* Z-score hidden from users */}
+
+          {/* Live price pill */}
+          <div className="flex items-center gap-2">
+            {anyBotRunning && (
+              <div className="flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-profit animate-pulse" />
+                <span className="text-xs text-muted font-mono">{settings?.trading_symbol ?? 'BTC-USD'}</span>
+              </div>
+            )}
+            {livePrice ? (
+              <span className="font-mono font-bold text-sm">${livePrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+            ) : null}
           </div>
+
+          {/* Right side */}
           <div className="flex items-center gap-2">
             {user?.is_admin && (
-              <button onClick={() => navigate('/admin')} className="text-xs px-3 py-1.5 rounded-lg bg-purple-500/15 border border-purple-500/30 text-purple-400 hover:bg-purple-500/25 transition-colors font-semibold">Admin</button>
+              <button onClick={() => navigate('/admin')} className="text-xs px-3 py-1.5 rounded-lg bg-purple-500/15 border border-purple-500/30 text-purple-400 font-semibold hidden sm:block">Admin</button>
             )}
-            <span className="text-xs text-muted hidden md:block">{user?.email}</span>
-            <button onClick={handleLogout} className="text-xs px-3 py-1.5 rounded-lg border border-border text-muted hover:text-white hover:border-accent/50 transition-colors">Logout</button>
+            <button onClick={handleLogout} className="text-xs px-3 py-1.5 rounded-lg border border-border text-muted hover:text-white transition-colors">Logout</button>
           </div>
         </div>
       </header>
 
-      {/* Tab Navigation */}
-      <div className="max-w-7xl mx-auto px-4 pt-4">
-        <div className="flex gap-2 mb-5">
-          {(['dashboard', 'trades', 'analytics', 'settings'] as const).map(tab => (
-            <TabButton key={tab} label={tab.charAt(0).toUpperCase() + tab.slice(1)} active={activeTab === tab} onClick={() => setActiveTab(tab)} />
+      {/* ── Tab nav ── */}
+      <div className="max-w-5xl mx-auto px-4 w-full">
+        <div className="flex gap-1 pt-4 pb-3 border-b border-border/50">
+          {([
+            { id: 'dashboard', label: '🏠 Home' },
+            { id: 'trades',    label: '📋 Trades' },
+            { id: 'settings',  label: '⚙️ Settings' },
+          ] as const).map(tab => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id as any)}
+              className={`px-5 py-2 rounded-lg text-sm font-semibold transition-colors ${
+                activeTab === tab.id
+                  ? 'bg-accent/15 text-accent border border-accent/25'
+                  : 'text-muted hover:text-white'
+              }`}>
+              {tab.label}
+            </button>
           ))}
         </div>
       </div>
 
-      <main className="max-w-7xl mx-auto px-4 pb-6 space-y-5">
+      <main className="max-w-5xl mx-auto px-4 w-full py-6 space-y-5 flex-1">
 
-        {/* ═══════════════ DASHBOARD TAB ═══════════════ */}
+        {/* ════════════════════════ HOME TAB ════════════════════════ */}
         {activeTab === 'dashboard' && (
           <>
-            {/* Mode Banner */}
-            {!anyBotRunning ? (
-              <div className="px-5 py-3 rounded-xl bg-warning/10 border border-warning/30 flex items-start gap-3">
-                <span className="text-xl mt-0.5">&#127917;</span>
-                <div>
-                  <p className="text-sm font-semibold text-warning">No Bots Running</p>
-                  <p className="text-xs text-muted mt-0.5">Start Robinhood (crypto) or Capital.com (GOLD/US100) below. Both can run at the same time.</p>
-                </div>
-              </div>
-            ) : (rhStatus?.running && !rhStatus.demo_mode) || (capStatus?.running && !capStatus.demo_mode) ? (
-              <div className="px-5 py-3 rounded-xl bg-profit/10 border border-profit/30 flex items-start gap-3">
-                <span className="text-xl mt-0.5">&#128176;</span>
-                <div>
-                  <p className="text-sm font-semibold text-profit">Live Trading Active</p>
-                  <p className="text-xs text-muted mt-0.5">Real orders are being placed. Your capital is at risk.</p>
-                </div>
-              </div>
-            ) : null}
-
-            {/* Key Invalid Warning */}
+            {/* Alerts */}
             {rhStatus?.key_invalid && (
-              <div className="flex items-start gap-3 p-4 rounded-2xl bg-loss/10 border border-loss/30">
-                <span className="text-loss text-lg flex-shrink-0">&#9888;</span>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-loss">Robinhood API Key Invalid</p>
-                  <p className="text-xs text-muted mt-0.5">Open Settings and update your API key.</p>
-                </div>
-                <button onClick={() => setActiveTab('settings')} className="flex-shrink-0 text-xs px-3 py-1.5 rounded-lg bg-loss/20 border border-loss/30 text-loss hover:bg-loss/30 transition-colors font-medium">Settings &rarr;</button>
+              <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-loss/10 border border-loss/30">
+                <span className="text-loss">⚠️</span>
+                <p className="text-sm text-loss flex-1">Robinhood API key invalid — update in Settings.</p>
+                <button onClick={() => setActiveTab('settings')} className="text-xs px-3 py-1.5 rounded-lg bg-loss/20 border border-loss/30 text-loss font-medium">Fix →</button>
+              </div>
+            )}
+            {_primaryStatus?.risk?.is_paused && (
+              <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-warning/10 border border-warning/30">
+                <span>⏸️</span>
+                <p className="text-sm text-warning flex-1">Trading paused — {_primaryStatus.risk.pause_reason}</p>
+                <button onClick={resumeTrading} className="text-xs px-3 py-1.5 rounded-lg bg-accent/20 border border-accent/30 text-accent font-medium">Resume</button>
               </div>
             )}
 
-            {/* Risk Pause Warning */}
-            {(_primaryStatus?.risk?.is_paused) && (
-              <div className="flex items-start gap-3 p-4 rounded-2xl bg-warning/10 border border-warning/30">
-                <span className="text-warning text-lg flex-shrink-0">&#9888;&#65039;</span>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-warning">Trading Paused by Risk Manager</p>
-                  <p className="text-xs text-muted mt-0.5">{_primaryStatus.risk!.pause_reason}</p>
+            {/* ── Hero: Balance + Stats ── */}
+            <div className="rounded-2xl border border-border bg-card p-6">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+                {/* Total balance */}
+                <div className="sm:col-span-1">
+                  <p className="text-xs text-muted mb-1 uppercase tracking-wider">Total Portfolio</p>
+                  <p className="text-4xl font-bold font-mono text-white">
+                    ${totalBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </p>
+                  <div className="flex items-center gap-2 mt-2">
+                    {anyBotRunning
+                      ? (rhStatus?.demo_mode !== false || capStatus?.demo_mode !== false)
+                        ? <span className="text-xs px-2 py-0.5 rounded-full bg-warning/15 text-warning border border-warning/30 font-medium">DEMO MODE</span>
+                        : <span className="text-xs px-2 py-0.5 rounded-full bg-profit/15 text-profit border border-profit/30 font-medium">LIVE MODE</span>
+                      : <span className="text-xs text-muted">Bot not running</span>
+                    }
+                  </div>
                 </div>
-                <button onClick={resumeTrading} className="flex-shrink-0 text-xs px-3 py-1.5 rounded-lg bg-accent/20 border border-accent/30 text-accent hover:bg-accent/30 transition-colors font-medium">Resume Trading</button>
-              </div>
-            )}
 
-            {/* Bot Controls — two cards side by side */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <BotCard
-                broker="robinhood"
-                label="Robinhood Crypto"
-                icon="&#129689;"
-                symbols={['BTC', 'ETH', 'SOL', 'DOGE']}
-                status={rhStatus}
-                loading={botLoadingRh}
-                hasKeys={settings?.has_api_keys ?? false}
-                onStart={(mode) => startBot('robinhood', mode)}
-                onStop={() => stopBot('robinhood')}
-                balance={liveDemoBalance}
-                balanceLabel="Robinhood Demo"
-              />
-              <BotCard
-                broker="capital"
-                label="Capital.com CFDs"
-                icon="&#128200;"
-                symbols={['GOLD', 'US100']}
-                status={capStatus}
-                loading={botLoadingCap}
-                hasKeys={settings?.has_capital_keys ?? false}
-                onStart={(mode) => startBot('capital', mode)}
-                onStop={() => stopBot('capital')}
-                balance={capitalDemoBalance ?? settings?.capital_demo_balance ?? 10000}
-                balanceLabel="Capital Demo"
-              />
+                {/* Key stats */}
+                <div className="sm:col-span-2 grid grid-cols-3 gap-4">
+                  <div className="p-3 rounded-xl bg-elevated text-center">
+                    <p className="text-xs text-muted mb-1">Today's P&amp;L</p>
+                    <p className={`text-xl font-bold font-mono ${dailyPnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+                      {dailyPnl >= 0 ? '+' : ''}${dailyPnl.toFixed(2)}
+                    </p>
+                  </div>
+                  <div className="p-3 rounded-xl bg-elevated text-center">
+                    <p className="text-xs text-muted mb-1">Win Rate</p>
+                    <p className={`text-xl font-bold font-mono ${(stats?.win_rate ?? 0) >= 50 ? 'text-profit' : 'text-loss'}`}>
+                      {stats?.win_rate ?? 0}%
+                    </p>
+                  </div>
+                  <div className="p-3 rounded-xl bg-elevated text-center">
+                    <p className="text-xs text-muted mb-1">Total Trades</p>
+                    <p className="text-xl font-bold font-mono text-white">{stats?.total ?? 0}</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Daily target bar */}
+              {anyBotRunning && (
+                <div className="mt-5 pt-4 border-t border-border/50">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs text-muted">Daily Goal</p>
+                    <p className={`text-xs font-mono font-bold ${dailyPnl >= dailyTarget ? 'text-profit' : 'text-muted'}`}>
+                      ${dailyPnl.toFixed(0)} / ${dailyTarget.toFixed(0)}
+                      {dailyPnl >= dailyTarget && ' 🎯'}
+                    </p>
+                  </div>
+                  <div className="h-1.5 rounded-full bg-elevated overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all duration-700 ${dailyPnl >= dailyTarget ? 'bg-profit' : 'bg-accent'}`}
+                      style={{ width: `${Math.min(100, Math.max(0, dailyProgressPct))}%` }}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
 
-            {/* Active trade details (primary in-trade status) */}
+            {/* ── Active Trade Banner ── */}
             {_primaryStatus?.in_trade && _primaryStatus.entry_price && (
-              <div className="p-4 rounded-xl bg-elevated border border-border">
-                <div className="flex flex-wrap gap-4 items-center">
-                  {[
-                    { label: 'Side', badge: true, val: _primaryStatus.trade_side },
-                    { label: 'Entry', value: `$${(_primaryStatus.entry_price ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` },
-                    ...(livePrice ? [{ label: 'Current', value: `$${livePrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}` }] : []),
-                    ...(currentPnl !== null ? [{ label: 'Live P&L', pnl: true, val: currentPnl }] : []),
-                    ...(_primaryStatus.trail_stop ? [{ label: 'Trail Stop', value: `$${_primaryStatus.trail_stop.toFixed(2)}`, dimmed: true }] : []),
-                    { label: 'Qty', value: `${_primaryStatus.position_size ?? '?'}` },
-                  ].map((item, i) => (
-                    <div key={i}>
-                      <p className="text-xs text-muted">{item.label}</p>
-                      {'badge' in item && item.badge ? (
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded ${item.val === 'buy' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>{(item.val as string).toUpperCase()}</span>
-                      ) : 'pnl' in item && item.pnl ? (
-                        <p className={`font-mono font-bold text-sm ${(item.val as number) >= 0 ? 'text-profit' : 'text-loss'}`}>{(item.val as number) >= 0 ? '+' : ''}{(item.val as number).toFixed(2)}%</p>
-                      ) : (
-                        <p className={`font-mono text-sm ${'dimmed' in item && item.dimmed ? 'text-warning' : 'text-white'}`}>{item.value}</p>
-                      )}
-                    </div>
-                  ))}
+              <div className="px-5 py-4 rounded-xl border bg-elevated border-accent/30 flex flex-wrap items-center gap-5">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-profit animate-pulse" />
+                  <span className="text-sm font-semibold">Trade Open</span>
                 </div>
+                <div>
+                  <p className="text-xs text-muted">Side</p>
+                  <span className={`text-sm font-bold ${_primaryStatus.trade_side === 'buy' ? 'text-profit' : 'text-loss'}`}>
+                    {(_primaryStatus.trade_side ?? '').toUpperCase()}
+                  </span>
+                </div>
+                <div>
+                  <p className="text-xs text-muted">Entry</p>
+                  <p className="text-sm font-mono font-bold">${_primaryStatus.entry_price.toLocaleString('en-US', { minimumFractionDigits: 2 })}</p>
+                </div>
+                {livePrice && (
+                  <div>
+                    <p className="text-xs text-muted">Now</p>
+                    <p className="text-sm font-mono font-bold">${livePrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}</p>
+                  </div>
+                )}
+                {currentPnl !== null && (
+                  <div>
+                    <p className="text-xs text-muted">Unrealised</p>
+                    <p className={`text-sm font-mono font-bold ${currentPnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+                      {currentPnl >= 0 ? '+' : ''}{currentPnl.toFixed(2)}%
+                    </p>
+                  </div>
+                )}
+                {_primaryStatus.trail_stop && (
+                  <div>
+                    <p className="text-xs text-muted">Trail Stop</p>
+                    <p className="text-sm font-mono text-warning">${_primaryStatus.trail_stop.toFixed(2)}</p>
+                  </div>
+                )}
               </div>
             )}
 
-            {/* Indicators hidden — strategy internals */}
-
-            {/* Price Chart + Stats */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-              {/* Price Chart */}
-              <div className="lg:col-span-2 bg-card border border-border rounded-2xl p-5">
-                <h2 className="text-xs font-semibold text-muted mb-4 uppercase tracking-wider">Price Chart</h2>
-                {priceHistory.length > 5 ? (
-                  <ResponsiveContainer width="100%" height={220}>
-                    <ComposedChart data={priceHistory}>
-                      <defs>
-                        <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#6366F1" stopOpacity={0.3} />
-                          <stop offset="95%" stopColor="#6366F1" stopOpacity={0} />
-                        </linearGradient>
-                      </defs>
-                      <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#A0A3B1' }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
-                      <YAxis tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} width={72} domain={['auto', 'auto']} tickFormatter={(v: number) => `$${v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0)}`} />
-                      <Tooltip contentStyle={{ backgroundColor: '#1A1B23', border: '1px solid #2A2B35', borderRadius: 8, fontSize: 12 }} />
-                      <Area type="monotone" dataKey="price" stroke="#6366F1" fill="url(#priceGrad)" strokeWidth={2} dot={false} />
-                      {_primaryStatus?.entry_price && <ReferenceLine y={_primaryStatus.entry_price} stroke="#10B981" strokeDasharray="3 3" label={{ value: 'Entry', fill: '#10B981', fontSize: 10 }} />}
-                      {_primaryStatus?.trail_stop && <ReferenceLine y={_primaryStatus.trail_stop} stroke="#EF4444" strokeDasharray="3 3" label={{ value: 'Trail', fill: '#EF4444', fontSize: 10 }} />}
-                    </ComposedChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div className="h-52 flex items-center justify-center text-muted text-sm">Start the bot to see price data here.</div>
-                )}
-              </div>
-
-              {/* Stats */}
-              <div className="bg-card border border-border rounded-2xl p-5">
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-xs font-semibold text-muted uppercase tracking-wider">Performance</h2>
-                  <div className="flex gap-1 bg-elevated rounded-lg p-0.5">
-                    {(['all', 'demo', 'live'] as const).map(m => (
-                      <button key={m} onClick={() => setPerfMode(m)} className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${perfMode === m ? m === 'live' ? 'bg-profit/20 text-profit' : m === 'demo' ? 'bg-warning/20 text-warning' : 'bg-accent/20 text-accent' : 'text-muted hover:text-white'}`}>{m === 'all' ? 'All' : m === 'live' ? 'Live' : 'Demo'}</button>
-                    ))}
-                  </div>
-                </div>
-                {(() => {
-                  const s = perfMode === 'demo' ? demoStats : perfMode === 'live' ? liveStats : stats
-                  return (
-                    <div className="grid grid-cols-2 gap-3">
-                      {[
-                        { label: 'Total Trades', val: s?.total ?? '\u2014' },
-                        { label: 'Win Rate', val: s ? `${s.win_rate}%` : '\u2014', color: s && s.win_rate >= 50 ? 'text-profit' : 'text-loss' },
-                        { label: 'Total P&L', val: s?.total_pnl != null ? `$${Number(s.total_pnl).toFixed(2)}` : '\u2014', color: s && (s.total_pnl ?? 0) >= 0 ? 'text-profit' : 'text-loss' },
-                        { label: 'Avg P&L', val: s?.avg_pnl != null ? `$${Number(s.avg_pnl).toFixed(2)}` : '\u2014', color: s && (s.avg_pnl ?? 0) >= 0 ? 'text-profit' : 'text-loss' },
-                      ].map((item, i) => (
-                        <div key={i} className="p-3 rounded-xl bg-elevated">
-                          <p className="text-xs text-muted mb-1">{item.label}</p>
-                          <p className={`text-xl font-bold font-mono ${item.color ?? 'text-white'}`}>{item.val}</p>
-                        </div>
-                      ))}
-                    </div>
-                  )
-                })()}
-
-                {/* Daily Compounding Target Progress */}
-                {botStatus?.running && (
-                  <div className="mt-4 pt-4 border-t border-border">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <p className="text-xs font-semibold text-muted uppercase tracking-wider">Daily Target</p>
-                      <span className={`text-xs font-mono font-bold ${dailyPnl >= dailyTarget ? 'text-profit' : dailyPnl > 0 ? 'text-warning' : 'text-muted'}`}>
-                        {dailyPnl >= 0 ? '+' : ''}${dailyPnl.toFixed(2)} / ${dailyTarget.toFixed(0)}
-                      </span>
-                    </div>
-                    <div className="h-2 rounded-full bg-elevated overflow-hidden">
-                      <div
-                        className={`h-full rounded-full transition-all duration-500 ${dailyPnl >= dailyTarget ? 'bg-profit' : 'bg-accent'}`}
-                        style={{ width: `${Math.min(100, Math.max(0, dailyProgressPct))}%` }}
-                      />
-                    </div>
-                    <div className="flex justify-between mt-1">
-                      <span className="text-xs text-muted">{dailyProgressPct.toFixed(0)}% of goal</span>
-                      {dailyPnl >= dailyTarget
-                        ? <span className="text-xs text-profit font-semibold">🎯 Target hit!</span>
-                        : <span className="text-xs text-muted">${Math.max(0, dailyTarget - dailyPnl).toFixed(0)} to go</span>
-                      }
-                    </div>
-                    <p className="text-xs text-muted/60 mt-1">Target compounds with balance (2%/day)</p>
-                  </div>
-                )}
-
-                {/* Balance */}
-                <div className="mt-4 pt-4 border-t border-border">
-                  <p className="text-xs font-semibold text-muted mb-2 uppercase tracking-wider">{isDemo ? 'Demo Balance' : 'Live Balance'}</p>
-                  {isDemo ? (
-                    (() => {
-                      const cash = liveDemoBalance ?? settings?.demo_balance ?? 10000
-                      const openPositionCost = trades
-                        .filter(t => t.state === 'open' && t.is_demo)
-                        .reduce((sum, t) => sum + (parseFloat(t.entry_price ?? '0') * parseFloat(t.quantity)), 0)
-                      const totalPortfolio = cash + openPositionCost
-                      return (
-                        <div className="space-y-2 mb-2">
-                          <div className="p-3 rounded-xl bg-elevated">
-                            <p className="text-xs text-muted mb-1">Total Portfolio Value</p>
-                            <p className="text-xl font-bold font-mono text-profit">${totalPortfolio.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                          </div>
-                          <div className="flex gap-2">
-                            <div className="flex-1 p-2.5 rounded-xl bg-elevated">
-                              <p className="text-xs text-muted mb-0.5">Available Cash</p>
-                              <p className="text-sm font-bold font-mono text-warning">${cash.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                            </div>
-                            <div className="flex-1 p-2.5 rounded-xl bg-elevated">
-                              <p className="text-xs text-muted mb-0.5">In Positions</p>
-                              <p className="text-sm font-bold font-mono text-accent">${openPositionCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                            </div>
-                          </div>
-                        </div>
-                      )
-                    })()
-                  ) : balance && !balance.error ? (
-                    <>
-                      {balance.available !== null && (
-                        <div className="p-3 rounded-xl bg-elevated mb-2">
-                          <p className="text-xs text-muted mb-1">Buying Power</p>
-                          <p className="text-xl font-bold font-mono text-profit">${balance.available.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                        </div>
-                      )}
-                      {balance.holdings.length > 0 && (
-                        <div className="space-y-1.5">
-                          {balance.holdings.map((h, i) => (
-                            <div key={i} className="flex justify-between items-center px-3 py-2 rounded-xl bg-elevated text-xs">
-                              <span className="font-semibold">{h.asset_code}</span>
-                              <span className="font-mono text-muted">{formatQty(h.total_quantity)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </>
-                  ) : balance?.error ? (
-                    <div className="px-3 py-2 rounded-xl bg-loss/10 border border-loss/30">
-                      <p className="text-xs text-loss font-medium">Balance unavailable</p>
-                      <p className="text-xs text-muted mt-0.5">{balance.error}</p>
-                    </div>
-                  ) : null}
-                </div>
-
-                {/* Risk Status */}
-                {_primaryStatus?.risk && (
-                  <div className="mt-4 pt-4 border-t border-border">
-                    <p className="text-xs font-semibold text-muted mb-2 uppercase tracking-wider">Risk Manager</p>
-                    <div className="space-y-1.5 text-xs">
-                      <div className="flex justify-between"><span className="text-muted">Daily P&L</span><span className={_primaryStatus.risk.daily_pnl >= 0 ? 'text-profit' : 'text-loss'}>${_primaryStatus.risk.daily_pnl.toFixed(2)}</span></div>
-                      <div className="flex justify-between"><span className="text-muted">Drawdown</span><span className={_primaryStatus.risk.daily_drawdown_pct > 3 ? 'text-warning' : 'text-muted'}>{_primaryStatus.risk.daily_drawdown_pct.toFixed(1)}% / {_primaryStatus.risk.max_drawdown_pct}%</span></div>
-                      <div className="flex justify-between"><span className="text-muted">Recent Stops</span><span>{_primaryStatus.risk.recent_stops} / {_primaryStatus.risk.max_stops}</span></div>
-                      {_primaryStatus.risk.cooldown_remaining > 0 && <div className="flex justify-between"><span className="text-muted">Cooldown</span><span className="text-warning">{_primaryStatus.risk.cooldown_remaining} ticks</span></div>}
-                    </div>
-                  </div>
-                )}
-              </div>
+            {/* ── Bot Controls ── */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <BotCard
+                broker="robinhood" label="Robinhood Crypto" icon="🪙"
+                symbols={['BTC', 'ETH', 'SOL', 'DOGE']}
+                status={rhStatus} loading={botLoadingRh}
+                hasKeys={settings?.has_api_keys ?? false}
+                onStart={mode => startBot('robinhood', mode)} onStop={() => stopBot('robinhood')}
+                balance={rhBalance} balanceLabel={rhStatus?.demo_mode !== false ? 'Demo Balance' : 'Live Balance'}
+              />
+              <BotCard
+                broker="capital" label="Capital.com CFDs" icon="📈"
+                symbols={['GOLD', 'US100']}
+                status={capStatus} loading={botLoadingCap}
+                hasKeys={settings?.has_capital_keys ?? false}
+                onStart={mode => startBot('capital', mode)} onStop={() => stopBot('capital')}
+                balance={capBalance} balanceLabel={capStatus?.demo_mode !== false ? 'Demo Balance' : 'Live Balance'}
+              />
             </div>
 
-            {/* Equity Curve + Live Feed */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              <div className="bg-card border border-border rounded-2xl p-5">
-                <div className="flex items-center gap-2 mb-4">
-                  <h2 className="text-xs font-semibold text-muted uppercase tracking-wider">Equity Curve</h2>
-                  {perfMode !== 'all' && <span className={`text-xs px-1.5 py-0.5 rounded font-semibold ${perfMode === 'live' ? 'bg-profit/15 text-profit' : 'bg-warning/15 text-warning'}`}>{perfMode.toUpperCase()}</span>}
+            {/* ── Price Chart ── */}
+            <div className="bg-card border border-border rounded-2xl p-5">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-sm font-semibold">Price Chart</h2>
+                {livePrice && <span className="font-mono text-sm text-muted">${livePrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>}
+              </div>
+              {priceHistory.length > 5 ? (
+                <ResponsiveContainer width="100%" height={200}>
+                  <ComposedChart data={priceHistory}>
+                    <defs>
+                      <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#6366F1" stopOpacity={0.3} />
+                        <stop offset="95%" stopColor="#6366F1" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#A0A3B1' }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
+                    <YAxis tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} width={72} domain={['auto', 'auto']}
+                      tickFormatter={(v: number) => `$${v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0)}`} />
+                    <Tooltip contentStyle={{ backgroundColor: '#1A1B23', border: '1px solid #2A2B35', borderRadius: 8, fontSize: 12 }} />
+                    <Area type="monotone" dataKey="price" stroke="#6366F1" fill="url(#priceGrad)" strokeWidth={2} dot={false} />
+                    {_primaryStatus?.entry_price && <ReferenceLine y={_primaryStatus.entry_price} stroke="#10B981" strokeDasharray="3 3" />}
+                    {_primaryStatus?.trail_stop && <ReferenceLine y={_primaryStatus.trail_stop} stroke="#EF4444" strokeDasharray="3 3" />}
+                  </ComposedChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="h-48 flex flex-col items-center justify-center gap-2 text-muted">
+                  <span className="text-3xl">📊</span>
+                  <p className="text-sm">Start the bot to see live price data</p>
                 </div>
+              )}
+            </div>
+
+            {/* ── Equity + Feed ── */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+              {/* Equity Curve */}
+              <div className="bg-card border border-border rounded-2xl p-5">
+                <h2 className="text-sm font-semibold mb-4">Portfolio Growth</h2>
                 {equityCurve.length > 1 ? (
-                  <ResponsiveContainer width="100%" height={155}>
+                  <ResponsiveContainer width="100%" height={150}>
                     <AreaChart data={equityCurve}>
                       <defs>
                         <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
@@ -1184,33 +1115,39 @@ export function Dashboard() {
                           <stop offset="95%" stopColor="#10B981" stopOpacity={0} />
                         </linearGradient>
                       </defs>
-                      <XAxis dataKey="time" tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} />
-                      <YAxis tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} width={72} domain={['auto', 'auto']} tickFormatter={(v: number) => `$${v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0)}`} />
-                      <Tooltip contentStyle={{ backgroundColor: '#1A1B23', border: '1px solid #2A2B35', borderRadius: 8, fontSize: 12 }} formatter={(v: number) => [`$${v.toFixed(2)}`, 'Balance']} />
+                      <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#A0A3B1' }} axisLine={false} tickLine={false} />
+                      <YAxis tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} width={68} domain={['auto', 'auto']}
+                        tickFormatter={(v: number) => `$${v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0)}`} />
+                      <Tooltip contentStyle={{ backgroundColor: '#1A1B23', border: '1px solid #2A2B35', borderRadius: 8, fontSize: 12 }}
+                        formatter={(v: number) => [`$${v.toFixed(2)}`, 'Balance']} />
                       <Area type="monotone" dataKey="balance" stroke="#10B981" fill="url(#eqGrad)" strokeWidth={2} dot={false} />
                     </AreaChart>
                   </ResponsiveContainer>
                 ) : (
-                  <div className="h-36 flex items-center justify-center text-muted text-sm">Trade history will build the equity curve.</div>
+                  <div className="h-36 flex items-center justify-center text-muted text-sm">Equity curve builds after your first trades.</div>
                 )}
               </div>
 
+              {/* Live Feed */}
               <div className="bg-card border border-border rounded-2xl p-5">
                 <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-xs font-semibold text-muted uppercase tracking-wider">Live Feed</h2>
-                  <div className="flex items-center gap-1.5"><div className="pulse-dot w-1.5 h-1.5 rounded-full bg-profit" /><span className="text-xs text-muted">Live</span></div>
+                  <h2 className="text-sm font-semibold">Live Activity</h2>
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-1.5 h-1.5 rounded-full bg-profit animate-pulse" />
+                    <span className="text-xs text-muted">Live</span>
+                  </div>
                 </div>
-                <div className="space-y-2 max-h-80 overflow-y-auto">
+                <div className="space-y-2 max-h-52 overflow-y-auto">
                   {feed.length === 0 ? (
-                    <p className="text-muted text-sm text-center py-10">Waiting for events...</p>
+                    <p className="text-muted text-sm text-center py-8">Bot activity will appear here.</p>
                   ) : feed.map(ev => (
-                    <div key={ev.id} className="slide-in flex items-start gap-3 p-3 rounded-xl bg-elevated border border-border/50">
+                    <div key={ev.id} className="flex items-start gap-2.5 p-2.5 rounded-xl bg-elevated border border-border/40">
                       <span className={`text-sm flex-shrink-0 ${ev.color}`}>
-                        {ev.type === 'trade_opened' ? '\ud83d\udcc8' : ev.type === 'trade_closed' ? '\ud83d\udcc9' : ev.type === 'ai' ? '\ud83e\udde0' : ev.type === 'error' ? '\u26a0\ufe0f' : ev.type === 'connected' ? '\ud83d\udd0c' : '\u00b7'}
+                        {ev.type === 'trade_opened' ? '📈' : ev.type === 'trade_closed' ? '📉' : ev.type === 'ai' ? '🧠' : ev.type === 'error' ? '⚠️' : ev.type === 'connected' ? '🔌' : '·'}
                       </span>
                       <div className="flex-1 min-w-0">
-                        <p className={`text-xs ${ev.color} break-words`}>{ev.message}</p>
-                        <p className="text-xs text-muted/60 mt-0.5">{ev.time}</p>
+                        <p className={`text-xs leading-relaxed ${ev.color} break-words`}>{ev.message}</p>
+                        <p className="text-xs text-muted/50 mt-0.5">{ev.time}</p>
                       </div>
                     </div>
                   ))}
@@ -1218,586 +1155,521 @@ export function Dashboard() {
               </div>
             </div>
 
-            {/* Nalo.Ai Pro Card */}
-            {!isPremium ? (
-              <div className="bg-gradient-to-r from-purple-900/30 via-card to-accent/10 border border-purple-500/30 rounded-2xl p-6">
-                <div className="flex flex-col md:flex-row items-start md:items-center gap-5">
+            {/* ── AI Report ── */}
+            {report && (
+              <div className="bg-card border border-border rounded-2xl p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-sm font-semibold">🧠 AI Daily Report</h2>
+                  <span className="text-xs text-muted">{report.report_date}</span>
+                </div>
+                <div className="grid grid-cols-3 gap-3 mb-4">
+                  {[
+                    { label: 'Win Rate', val: `${report.win_rate.toFixed(1)}%`, color: report.win_rate >= 50 ? 'text-profit' : 'text-loss' },
+                    { label: 'Trades', val: String(report.total_trades), color: 'text-white' },
+                    { label: 'P&L', val: `${report.total_pnl >= 0 ? '+' : ''}$${report.total_pnl.toFixed(2)}`, color: report.total_pnl >= 0 ? 'text-profit' : 'text-loss' },
+                  ].map((s, i) => (
+                    <div key={i} className="p-3 rounded-xl bg-elevated text-center">
+                      <p className="text-xs text-muted mb-1">{s.label}</p>
+                      <p className={`font-bold font-mono text-sm ${s.color}`}>{s.val}</p>
+                    </div>
+                  ))}
+                </div>
+                {report.summary && <p className="text-sm text-muted leading-relaxed">{report.summary}</p>}
+                {report.top_improvement && (
+                  <div className="mt-3 px-4 py-2.5 rounded-xl bg-warning/10 border border-warning/20">
+                    <p className="text-xs text-warning font-semibold mb-1">Tip</p>
+                    <p className="text-sm">{report.top_improvement}</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── Pro Upsell ── */}
+            {!isPremium && (
+              <div className="rounded-2xl border border-purple-500/30 bg-gradient-to-r from-purple-900/20 to-accent/5 p-6">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
                   <div className="flex-1">
                     <div className="flex items-center gap-2 mb-2">
-                      <span className="text-2xl">&#x1f9e0;</span>
-                      <h2 className="font-bold text-lg" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>Nalo.Ai Pro</h2>
+                      <span className="text-xl">🧠</span>
+                      <h3 className="font-bold">Nalo.Ai Pro</h3>
                       <span className="text-xs px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-400 border border-purple-500/30 font-semibold">$199/mo</span>
                     </div>
-                    <p className="text-sm text-muted mb-3">Your bot gets smarter with every trade. AI analyzes each closed trade and auto-calibrates strategy parameters for better profitability.</p>
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      {[
-                        'AI trade analysis on every trade',
-                        'Auto-calibration after each close',
-                        'Parameters adapt to market shifts',
-                        'Bot improves over time',
-                      ].map((f, i) => (
-                        <div key={i} className="flex items-center gap-1.5 text-purple-300">
-                          <span className="text-profit">&#10003;</span> {f}
-                        </div>
-                      ))}
-                    </div>
+                    <p className="text-sm text-muted">AI analyses every trade and auto-tunes your strategy parameters to improve profitability over time.</p>
                   </div>
-                  <button onClick={() => setShowPremiumModal(true)} className="px-6 py-3 rounded-xl bg-purple-600 hover:bg-purple-500 transition-colors font-semibold text-sm whitespace-nowrap shadow-lg shadow-purple-600/20">
+                  <button onClick={() => setShowPremiumModal(true)}
+                    className="px-6 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 font-semibold text-sm transition-colors shadow-lg shadow-purple-600/20 whitespace-nowrap">
                     Upgrade to Pro
                   </button>
                 </div>
               </div>
-            ) : (
-              <div className="bg-card border border-purple-500/30 rounded-2xl p-5">
-                <div className="flex items-center justify-between mb-3">
+            )}
+
+            {isPremium && (
+              <div className="rounded-2xl border border-purple-500/30 bg-purple-900/10 p-5">
+                <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span className="text-lg">&#x1f9e0;</span>
-                    <h2 className="font-semibold text-sm" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>Nalo.Ai Pro</h2>
-                    <span className="text-xs px-2 py-0.5 rounded-full bg-profit/20 text-profit border border-profit/30 font-semibold">Active</span>
+                    <span>🧠</span>
+                    <span className="font-semibold text-sm">Nalo.Ai Pro Active</span>
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-400 border border-purple-500/30">AI Calibration ON</span>
                   </div>
-                  <div className="flex items-center gap-3 text-xs text-muted">
-                    <span>Calibrations: <strong className="text-purple-400">{premiumData?.calibration_count ?? 0}</strong></span>
-                    {premiumData?.last_calibration_at && <span>Last: {new Date(premiumData.last_calibration_at).toLocaleString()}</span>}
-                  </div>
+                  <button onClick={manageSubscription} className="text-xs px-3 py-1.5 rounded-lg border border-purple-500/30 text-purple-400 hover:bg-purple-500/10 transition-colors">Manage</button>
                 </div>
-                {calibrations.length > 0 ? (
-                  <div className="space-y-2">
-                    {calibrations.slice(0, 3).map((cal: any, i: number) => (
-                      <div key={i} className="px-4 py-3 rounded-xl bg-elevated border border-border/50">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="text-xs text-purple-400 font-semibold">Calibration #{premiumData?.calibration_count - i}</span>
-                              <span className="text-xs text-muted">{cal.created_at ? new Date(cal.created_at).toLocaleString() : ''}</span>
-                            </div>
-                            {Object.keys(cal.param_changes || {}).length > 0 ? (
-                              <div className="flex flex-wrap gap-1.5 mb-1">
-                                {Object.entries(cal.param_changes).map(([param, change]: [string, any]) => (
-                                  <span key={param} className="text-xs px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 font-mono">
-                                    {param}: {typeof change.old === 'number' && change.old < 1 ? `${(change.old * 100).toFixed(1)}%` : change.old} &rarr; {typeof change.new === 'number' && change.new < 1 ? `${(change.new * 100).toFixed(1)}%` : change.new}
-                                  </span>
-                                ))}
-                              </div>
-                            ) : (
-                              <p className="text-xs text-muted">No parameter changes needed</p>
-                            )}
-                            {cal.ai_reasoning && <p className="text-xs text-muted mt-1 truncate">{cal.ai_reasoning}</p>}
-                          </div>
-                          <span className="text-xs text-muted flex-shrink-0">{cal.trade_count_analyzed} trades analyzed</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-center py-6 text-muted text-sm">
-                    <p>AI auto-calibration will kick in after your next closed trade.</p>
-                    <p className="text-xs mt-1 text-muted/60">Minimum 5 closed trades required for meaningful calibration.</p>
-                  </div>
+                {calibrations.length > 0 && (
+                  <p className="text-xs text-muted mt-2">{calibrations.length} calibrations applied — your bot is getting smarter.</p>
                 )}
               </div>
             )}
           </>
         )}
 
-        {/* ═══════════════ TRADES TAB ═══════════════ */}
+        {/* ════════════════════════ TRADES TAB ════════════════════════ */}
         {activeTab === 'trades' && (
-          <div className="bg-card border border-border rounded-2xl p-5">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-4 gap-2">
-              <h2 className="text-xs font-semibold text-muted uppercase tracking-wider">Trade History</h2>
-              <div className="flex flex-wrap gap-2">
-                {/* Broker filter */}
-                <div className="flex gap-1 bg-elevated rounded-lg p-0.5">
-                  {(['all', 'robinhood', 'capital'] as const).map(b => (
-                    <button key={b} onClick={() => { setBrokerFilter(b); loadData() }}
-                      className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${brokerFilter === b ? 'bg-accent/20 text-accent' : 'text-muted hover:text-white'}`}>
-                      {b === 'all' ? 'All' : b === 'robinhood' ? 'Robinhood' : 'Capital'}
-                    </button>
-                  ))}
-                </div>
-                {/* Mode filter */}
-                <div className="flex gap-1 bg-elevated rounded-lg p-0.5">
-                  {(['all', 'live', 'demo'] as const).map(f => (
-                    <button key={f} onClick={() => setTradeFilter(f)} className={`px-3 py-1 rounded-md text-xs font-semibold transition-colors ${tradeFilter === f ? f === 'live' ? 'bg-profit/20 text-profit' : f === 'demo' ? 'bg-warning/20 text-warning' : 'bg-accent/20 text-accent' : 'text-muted hover:text-white'}`}>{f === 'all' ? 'All' : f === 'live' ? 'Live' : 'Demo'}</button>
-                  ))}
-                </div>
-              </div>
-            </div>
-            {trades.length === 0 ? (
-              <p className="text-muted text-sm text-center py-10">No trades yet.</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="text-xs text-muted border-b border-border">
-                      {['Date', 'Symbol', 'Mode', 'Side', 'Qty', 'Entry', 'Exit', 'P&L', 'Reason', 'AI'].map((h, i) => (
-                        <th key={i} className={`pb-3 font-medium ${i >= 5 ? 'text-right' : i === 9 ? 'text-center' : 'text-left'}`}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {trades.map(trade => (
-                      <React.Fragment key={trade.id}>
-                        <tr onClick={() => setExpandedTrade(expandedTrade === trade.id ? null : trade.id)} className="border-b border-border/40 hover:bg-elevated/50 cursor-pointer transition-colors">
-                          <td className="py-3 text-muted text-xs font-mono">{trade.opened_at ? new Date(trade.opened_at).toLocaleDateString() : '\u2014'}</td>
-                          <td className="py-3 font-mono font-medium">{trade.symbol}</td>
-                          <td className="py-3"><span className={`text-xs px-1.5 py-0.5 rounded font-semibold ${trade.is_demo ? 'bg-warning/15 text-warning' : 'bg-profit/15 text-profit'}`}>{trade.is_demo ? 'DEMO' : 'LIVE'}</span></td>
-                          <td className="py-3"><span className={`text-xs px-2 py-0.5 rounded font-bold ${trade.side === 'buy' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>{trade.side.toUpperCase()}</span></td>
-                          <td className="py-3 text-xs font-mono text-muted">{formatQty(trade.quantity)}</td>
-                          <td className="py-3 text-right font-mono text-xs">{trade.entry_price ? `$${parseFloat(trade.entry_price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '\u2014'}</td>
-                          <td className="py-3 text-right font-mono text-xs">{trade.exit_price ? `$${parseFloat(trade.exit_price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '\u2014'}</td>
-                          <td className="py-3 text-right font-mono">
-                            {trade.pnl !== null ? <span className={trade.pnl >= 0 ? 'text-profit' : 'text-loss'}>{trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}</span> : <span className="text-xs text-muted">{trade.state === 'open' ? 'OPEN' : '\u2014'}</span>}
-                          </td>
-                          <td className="py-3 text-xs text-muted">{trade.exit_reason?.replace(/_/g, ' ') ?? '\u2014'}</td>
-                          <td className="py-3 text-right"><GradeBadge grade={trade.ai?.grade} /></td>
-                        </tr>
-                        {expandedTrade === trade.id && trade.ai && (
-                          <tr key={`${trade.id}-ai`}>
-                            <td colSpan={10} className="px-4 py-4 bg-elevated/40">
-                              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                                <div><p className="text-muted font-semibold mb-1">Entry Quality</p><p>{trade.ai.entry_quality}</p></div>
-                                <div><p className="text-muted font-semibold mb-1">Exit Quality</p><p>{trade.ai.exit_quality}</p></div>
-                                <div><p className="text-muted font-semibold mb-1">Confidence</p><p>{(trade.ai.confidence * 100).toFixed(0)}%</p></div>
-                                {trade.ai.what_went_well.length > 0 && <div><p className="text-profit font-semibold mb-1">What went well</p><ul className="space-y-0.5">{trade.ai.what_went_well.map((w, i) => <li key={i}>&bull; {w}</li>)}</ul></div>}
-                                {trade.ai.what_went_wrong.length > 0 && <div><p className="text-loss font-semibold mb-1">What went wrong</p><ul className="space-y-0.5">{trade.ai.what_went_wrong.map((w, i) => <li key={i}>&bull; {w}</li>)}</ul></div>}
-                                {trade.ai.improvements.length > 0 && <div><p className="text-warning font-semibold mb-1">Improvements</p><ul className="space-y-0.5">{trade.ai.improvements.map((w, i) => <li key={i}>&bull; {w}</li>)}</ul></div>}
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </React.Fragment>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ═══════════════ ANALYTICS TAB ═══════════════ */}
-        {activeTab === 'analytics' && (
           <>
-            {/* P&L Chart */}
-            <div className="bg-card border border-border rounded-2xl p-5">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-xs font-semibold text-muted uppercase tracking-wider">P&L &mdash; Last 30 Trades</h2>
-                <div className="flex gap-1 bg-elevated rounded-lg p-0.5">
-                  {(['all', 'demo', 'live'] as const).map(m => (
-                    <button key={m} onClick={() => setPerfMode(m)} className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${perfMode === m ? m === 'live' ? 'bg-profit/20 text-profit' : m === 'demo' ? 'bg-warning/20 text-warning' : 'bg-accent/20 text-accent' : 'text-muted hover:text-white'}`}>{m === 'all' ? 'All' : m === 'live' ? 'Live' : 'Demo'}</button>
-                  ))}
-                </div>
+            {/* Filters */}
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex gap-1 bg-elevated rounded-xl p-1">
+                {(['all', 'demo', 'live'] as const).map(m => (
+                  <button key={m} onClick={() => setTradeFilter(m)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                      tradeFilter === m
+                        ? m === 'live' ? 'bg-profit/20 text-profit' : m === 'demo' ? 'bg-warning/20 text-warning' : 'bg-accent/20 text-accent'
+                        : 'text-muted hover:text-white'
+                    }`}>
+                    {m === 'all' ? 'All' : m === 'live' ? '🟢 Live' : '🟡 Demo'}
+                  </button>
+                ))}
               </div>
-              {(() => { const s = perfMode === 'demo' ? demoStats : perfMode === 'live' ? liveStats : stats; return s?.pnl_chart?.length ? (
-                <ResponsiveContainer width="100%" height={200}>
-                  <AreaChart data={s.pnl_chart}>
-                    <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#10B981" stopOpacity={0.3} /><stop offset="95%" stopColor="#10B981" stopOpacity={0} /></linearGradient></defs>
-                    <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} />
-                    <YAxis tick={{ fontSize: 10, fill: '#A0A3B1' }} axisLine={false} tickLine={false} width={64} tickFormatter={(v: number) => `${v >= 0 ? '+' : ''}$${v.toFixed(0)}`} />
-                    <Tooltip contentStyle={{ backgroundColor: '#1A1B23', border: '1px solid #2A2B35', borderRadius: 8, fontSize: 12 }} formatter={(v: number) => [`${v >= 0 ? '+' : ''}$${v.toFixed(2)}`, 'P&L']} />
-                    <Area type="monotone" dataKey="pnl" stroke="#10B981" fill="url(#g)" strokeWidth={2} dot={false} />
-                  </AreaChart>
-                </ResponsiveContainer>
-              ) : <div className="h-48 flex items-center justify-center text-muted text-sm">No P&L data yet for {perfMode === 'all' ? 'any' : perfMode} trades.</div>; })()}
+              <div className="flex gap-1 bg-elevated rounded-xl p-1">
+                {(['all', 'robinhood', 'capital'] as const).map(b => (
+                  <button key={b} onClick={() => setBrokerFilter(b)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                      brokerFilter === b ? 'bg-accent/20 text-accent' : 'text-muted hover:text-white'
+                    }`}>
+                    {b === 'all' ? 'All Brokers' : b === 'robinhood' ? '🪙 Robinhood' : '📈 Capital.com'}
+                  </button>
+                ))}
+              </div>
+              {/* Summary pills */}
+              {stats && (
+                <div className="flex gap-2 ml-auto text-xs">
+                  <span className="px-2 py-1 rounded-lg bg-elevated text-muted">
+                    {stats.total} trades · {stats.win_rate}% win
+                  </span>
+                  <span className={`px-2 py-1 rounded-lg font-mono font-semibold ${(stats.total_pnl ?? 0) >= 0 ? 'bg-profit/10 text-profit' : 'bg-loss/10 text-loss'}`}>
+                    {(stats.total_pnl ?? 0) >= 0 ? '+' : ''}${(stats.total_pnl ?? 0).toFixed(2)}
+                  </span>
+                </div>
+              )}
             </div>
 
-            {/* AI Report */}
-            <div className="bg-card border border-border rounded-2xl p-5">
-              <h2 className="text-xs font-semibold text-muted mb-4 uppercase tracking-wider">Latest AI Report</h2>
-              {report ? (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-muted">{report.report_date}</span>
-                    {report.full_report?.recommendation && (
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium capitalize ${report.full_report.recommendation === 'continue' ? 'bg-profit/20 text-profit' : report.full_report.recommendation === 'pause' ? 'bg-loss/20 text-loss' : 'bg-warning/20 text-warning'}`}>{report.full_report.recommendation.replace(/_/g, ' ')}</span>
-                    )}
-                  </div>
-                  <div className="grid grid-cols-3 gap-2 text-center">
-                    {[
-                      { label: 'Win Rate', val: `${report.win_rate.toFixed(1)}%`, color: report.win_rate >= 50 ? 'text-profit' : 'text-loss' },
-                      { label: 'Trades', val: report.total_trades, color: 'text-white' },
-                      { label: 'P&L', val: `${report.total_pnl >= 0 ? '+' : ''}$${report.total_pnl.toFixed(2)}`, color: report.total_pnl >= 0 ? 'text-profit' : 'text-loss' },
-                    ].map((s, i) => (
-                      <div key={i} className="p-2 rounded-lg bg-elevated"><p className="text-xs text-muted">{s.label}</p><p className={`font-bold font-mono text-sm ${s.color}`}>{s.val}</p></div>
-                    ))}
-                  </div>
-                  {report.summary && <p className="text-sm text-muted leading-relaxed">{report.summary}</p>}
-                  {report.top_improvement && (
-                    <div className="px-4 py-3 rounded-xl bg-warning/10 border border-warning/20">
-                      <p className="text-xs text-warning font-semibold mb-1">Top Improvement</p>
-                      <p className="text-sm">{report.top_improvement}</p>
+            {/* Trade list */}
+            <div className="space-y-2">
+              {trades.length === 0 ? (
+                <div className="py-16 flex flex-col items-center gap-3 text-muted">
+                  <span className="text-4xl">📭</span>
+                  <p className="text-sm">No trades yet. Start a bot to begin.</p>
+                </div>
+              ) : trades.map(trade => (
+                <div key={trade.id}>
+                  <button
+                    className={`w-full text-left p-4 rounded-xl border transition-colors ${
+                      expandedTrade === trade.id ? 'border-accent/30 bg-elevated' : 'border-border bg-card hover:border-border/80 hover:bg-elevated/50'
+                    }`}
+                    onClick={() => setExpandedTrade(expandedTrade === trade.id ? null : trade.id)}
+                  >
+                    <div className="flex items-center gap-3">
+                      {/* Side badge */}
+                      <span className={`w-10 h-10 rounded-xl flex items-center justify-center text-sm font-bold flex-shrink-0 ${
+                        trade.side === 'buy' ? 'bg-profit/15 text-profit' : 'bg-loss/15 text-loss'
+                      }`}>
+                        {trade.side === 'buy' ? '↑' : '↓'}
+                      </span>
+
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-semibold text-sm">{trade.symbol}</span>
+                          <span className="text-xs text-muted">{trade.side.toUpperCase()}</span>
+                          {trade.is_demo
+                            ? <span className="text-xs px-1.5 py-0.5 rounded bg-warning/10 text-warning font-medium">DEMO</span>
+                            : <span className="text-xs px-1.5 py-0.5 rounded bg-profit/10 text-profit font-medium">LIVE</span>
+                          }
+                          {trade.state === 'open' && <span className="text-xs px-1.5 py-0.5 rounded bg-accent/10 text-accent font-medium">OPEN</span>}
+                          {trade.ai?.grade && trade.ai.grade !== 'N/A' && <GradeBadge grade={trade.ai.grade} />}
+                        </div>
+                        <p className="text-xs text-muted mt-0.5">
+                          {trade.opened_at ? new Date(trade.opened_at).toLocaleString() : '—'}
+                          {trade.exit_reason && ` · ${trade.exit_reason}`}
+                        </p>
+                      </div>
+
+                      <div className="text-right flex-shrink-0">
+                        {trade.pnl !== null ? (
+                          <p className={`font-mono font-bold text-sm ${trade.pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+                            {trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}
+                          </p>
+                        ) : (
+                          <p className="text-muted text-sm">—</p>
+                        )}
+                        {trade.entry_price && (
+                          <p className="text-xs text-muted font-mono">${parseFloat(trade.entry_price).toLocaleString('en-US', { minimumFractionDigits: 2 })}</p>
+                        )}
+                      </div>
+                    </div>
+                  </button>
+
+                  {/* Expanded details */}
+                  {expandedTrade === trade.id && (
+                    <div className="mx-2 p-4 rounded-b-xl bg-elevated border border-t-0 border-border/50 space-y-3">
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                        {[
+                          { label: 'Entry', val: trade.entry_price ? `$${parseFloat(trade.entry_price).toLocaleString()}` : '—' },
+                          { label: 'Exit', val: trade.exit_price ? `$${parseFloat(trade.exit_price).toLocaleString()}` : '—' },
+                          { label: 'Quantity', val: formatQty(trade.quantity) },
+                          { label: 'P&L %', val: trade.pnl_pct !== null ? `${trade.pnl_pct.toFixed(2)}%` : '—' },
+                        ].map((f, i) => (
+                          <div key={i} className="p-2.5 rounded-lg bg-card">
+                            <p className="text-muted mb-1">{f.label}</p>
+                            <p className="font-mono font-semibold text-white">{f.val}</p>
+                          </div>
+                        ))}
+                      </div>
+                      {trade.ai?.analyzed && (
+                        <div className="p-3 rounded-xl bg-purple-900/20 border border-purple-500/20 space-y-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs">🧠 AI Analysis</span>
+                            <GradeBadge grade={trade.ai.grade} />
+                          </div>
+                          {trade.ai.what_went_well?.length > 0 && (
+                            <div className="text-xs text-profit">✓ {trade.ai.what_went_well[0]}</div>
+                          )}
+                          {trade.ai.improvements?.length > 0 && (
+                            <div className="text-xs text-warning">→ {trade.ai.improvements[0]}</div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
-              ) : <p className="text-muted text-sm text-center py-10">Reports generated after trading activity.</p>}
+              ))}
             </div>
           </>
         )}
 
-        {/* ═══════════════ SETTINGS TAB ═══════════════ */}
+        {/* ════════════════════════ SETTINGS TAB ════════════════════════ */}
         {activeTab === 'settings' && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          <div className="space-y-5">
 
-            {/* API Keys — 3-tab broker card */}
+            {/* ── Broker Setup ── */}
             <div className="bg-card border border-border rounded-2xl p-5">
-              <h3 className="font-semibold mb-3 text-sm">Broker API Setup</h3>
-              {/* Broker tab selector */}
-              <div className="flex gap-1.5 mb-4 p-1 bg-elevated rounded-xl">
-                {(['robinhood', 'capital', 'tradovate'] as const).map(b => (
-                  <button key={b} onClick={() => setBrokerKeysTab(b)}
-                    className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-colors ${brokerKeysTab === b ? 'bg-accent text-white' : 'text-muted hover:text-white'}`}>
-                    {b === 'robinhood' ? '🪙 Robinhood' : b === 'capital' ? '📈 Capital.com' : '⚡ Tradovate'}
+              <h3 className="font-semibold mb-4">Broker Setup</h3>
+
+              {/* Broker tabs */}
+              <div className="flex gap-1.5 p-1 bg-elevated rounded-xl mb-5">
+                {([
+                  { val: 'robinhood', label: '🪙 Robinhood', sub: 'BTC · ETH · SOL' },
+                  { val: 'capital',   label: '📈 Capital.com', sub: 'GOLD · US100' },
+                  { val: 'tradovate', label: '⚡ Tradovate', sub: 'Futures' },
+                ] as const).map(b => (
+                  <button key={b.val} onClick={() => setBrokerKeysTab(b.val)}
+                    className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-colors ${brokerKeysTab === b.val ? 'bg-accent text-white' : 'text-muted hover:text-white'}`}>
+                    <span className="block">{b.label}</span>
+                    <span className="text-xs opacity-60 font-normal">{b.sub}</span>
                   </button>
                 ))}
               </div>
 
-              {/* ── Robinhood tab ── */}
+              {/* Robinhood */}
               {brokerKeysTab === 'robinhood' && (
-                <div className="space-y-3">
-                  <p className="text-xs text-muted">Trade BTC, ETH, SOL, DOGE via Robinhood Crypto.</p>
+                <div className="space-y-4">
+                  <div className="p-3 rounded-xl bg-accent/5 border border-accent/20 text-xs text-muted">
+                    Register your public key on <span className="text-accent">robinhood.com → Investing → API Integrations</span>
+                  </div>
                   <div>
-                    <label className="block text-xs text-muted mb-1.5">Your Public Key <span className="text-muted/60">(register on Robinhood)</span></label>
+                    <label className="block text-xs text-muted mb-1.5">Your Public Key</label>
                     <div className="flex gap-2">
-                      <input type="text" readOnly value={settings?.public_key ?? ''} className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-xs font-mono focus:outline-none" />
-                      <button onClick={() => { navigator.clipboard.writeText(settings?.public_key ?? ''); showToast('Copied!') }} className="flex-shrink-0 px-3 py-2.5 rounded-xl bg-elevated border border-border text-muted hover:text-white text-xs">Copy</button>
+                      <input readOnly value={settings?.public_key ?? ''} className="flex-1 px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-xs font-mono focus:outline-none" />
+                      <button onClick={() => { navigator.clipboard.writeText(settings?.public_key ?? ''); showToast('Copied!') }}
+                        className="px-4 py-2.5 rounded-xl bg-elevated border border-border text-xs text-muted hover:text-white transition-colors">Copy</button>
                     </div>
                   </div>
                   <div>
                     <label className="block text-xs text-muted mb-1.5">Robinhood API Key</label>
-                    <input type="text" value={rhApiKey} onChange={e => setRhApiKey(e.target.value)} placeholder="rh-api-key-..." className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
+                    <input type="text" value={rhApiKey} onChange={e => setRhApiKey(e.target.value)} placeholder="rh-api-key-..."
+                      className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
                   </div>
                   <div className="flex gap-2">
-                    <button onClick={saveKeys} disabled={keysLoading} className="px-5 py-2.5 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 transition-colors text-sm font-medium">{keysLoading ? 'Saving...' : 'Save Key'}</button>
-                    {settings?.has_api_keys && brokerKeysTab === 'robinhood' && <button onClick={testConnection} disabled={testLoading} className="px-4 py-2.5 rounded-xl bg-elevated border border-border hover:border-accent/50 disabled:opacity-50 text-sm font-medium text-muted hover:text-white">{testLoading ? 'Testing...' : 'Test'}</button>}
+                    <button onClick={saveKeys} disabled={keysLoading}
+                      className="px-5 py-2.5 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 text-sm font-medium transition-colors">
+                      {keysLoading ? 'Saving...' : 'Save Key'}
+                    </button>
+                    {settings?.has_api_keys && (
+                      <button onClick={testConnection} disabled={testLoading}
+                        className="px-4 py-2.5 rounded-xl bg-elevated border border-border hover:border-accent/50 disabled:opacity-50 text-sm text-muted hover:text-white transition-colors">
+                        {testLoading ? 'Testing...' : 'Test'}
+                      </button>
+                    )}
                   </div>
-                  {testResult && <div className={`px-3 py-2 rounded-lg text-xs ${testResult.ok ? 'bg-profit/10 border border-profit/30 text-profit' : 'bg-loss/10 border border-loss/30 text-loss'}`}>{testResult.ok ? '✓ ' : '✗ '}{testResult.msg}</div>}
+                  {testResult && (
+                    <p className={`text-xs px-3 py-2 rounded-lg ${testResult.ok ? 'bg-profit/10 border border-profit/30 text-profit' : 'bg-loss/10 border border-loss/30 text-loss'}`}>
+                      {testResult.ok ? '✓ ' : '✗ '}{testResult.msg}
+                    </p>
+                  )}
                 </div>
               )}
 
-              {/* ── Capital.com tab ── */}
+              {/* Capital.com */}
               {brokerKeysTab === 'capital' && (
-                <div className="space-y-3">
-                  <p className="text-xs text-muted">Trade Gold (XAU/USD) and NAS100 as CFDs. Global access, FCA/CySEC regulated.</p>
-                  <div className="px-3 py-2 rounded-xl bg-accent/5 border border-accent/20 text-xs text-muted">
+                <div className="space-y-4">
+                  <div className="p-3 rounded-xl bg-accent/5 border border-accent/20 text-xs text-muted">
                     Get your API key: <span className="text-accent">capital.com → Settings → API Integrations → Generate Key</span>
                   </div>
-                  <div>
-                    <label className="block text-xs text-muted mb-1.5">API Key</label>
-                    <input type="text" value={capitalApiKey} onChange={e => setCapitalApiKey(e.target.value)} placeholder="your-capital-api-key" className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm font-mono placeholder-muted/40 focus:outline-none focus:border-accent" />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-muted mb-1.5">Login Email</label>
-                    <input type="email" value={capitalIdentifier} onChange={e => setCapitalIdentifier(e.target.value)} placeholder="you@example.com" className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-muted mb-1.5">Login Password</label>
-                    <input type="password" value={capitalPassword} onChange={e => setCapitalPassword(e.target.value)} placeholder="••••••••" className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
-                  </div>
+                  {[
+                    { label: 'API Key', val: capitalApiKey, set: setCapitalApiKey, placeholder: 'your-capital-api-key', type: 'text' },
+                    { label: 'Login Email', val: capitalIdentifier, set: setCapitalIdentifier, placeholder: 'you@example.com', type: 'email' },
+                    { label: 'Login Password', val: capitalPassword, set: setCapitalPassword, placeholder: '••••••••', type: 'password' },
+                  ].map(f => (
+                    <div key={f.label}>
+                      <label className="block text-xs text-muted mb-1.5">{f.label}</label>
+                      <input type={f.type} value={f.val} onChange={e => f.set(e.target.value)} placeholder={f.placeholder}
+                        className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
+                    </div>
+                  ))}
                   <div className="flex gap-2">
-                    <button onClick={saveCapitalKeys} disabled={capitalKeyLoading} className="px-5 py-2.5 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 transition-colors text-sm font-medium">{capitalKeyLoading ? 'Saving...' : 'Save Keys'}</button>
-                    {settings?.has_capital_keys && <button onClick={testCapitalConnection} disabled={capitalTestLoading} className="px-4 py-2.5 rounded-xl bg-elevated border border-border hover:border-accent/50 disabled:opacity-50 text-sm font-medium text-muted hover:text-white">{capitalTestLoading ? 'Testing...' : 'Test Connection'}</button>}
+                    <button onClick={saveCapitalKeys} disabled={capitalKeyLoading}
+                      className="px-5 py-2.5 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 text-sm font-medium transition-colors">
+                      {capitalKeyLoading ? 'Saving...' : 'Save Keys'}
+                    </button>
+                    {settings?.has_capital_keys && (
+                      <button onClick={testCapitalConnection} disabled={capitalTestLoading}
+                        className="px-4 py-2.5 rounded-xl bg-elevated border border-border hover:border-accent/50 disabled:opacity-50 text-sm text-muted hover:text-white transition-colors">
+                        {capitalTestLoading ? 'Testing...' : 'Test Connection'}
+                      </button>
+                    )}
                   </div>
-                  {capitalTestResult && <div className={`px-3 py-2 rounded-lg text-xs ${capitalTestResult.ok ? 'bg-profit/10 border border-profit/30 text-profit' : 'bg-loss/10 border border-loss/30 text-loss'}`}>{capitalTestResult.ok ? '✓ ' : '✗ '}{capitalTestResult.msg}</div>}
+                  {capitalTestResult && (
+                    <p className={`text-xs px-3 py-2 rounded-lg ${capitalTestResult.ok ? 'bg-profit/10 border border-profit/30 text-profit' : 'bg-loss/10 border border-loss/30 text-loss'}`}>
+                      {capitalTestResult.ok ? '✓ ' : '✗ '}{capitalTestResult.msg}
+                    </p>
+                  )}
                 </div>
               )}
 
-              {/* ── Tradovate tab ── */}
+              {/* Tradovate */}
               {brokerKeysTab === 'tradovate' && (
-                <div className="space-y-3">
-                  <p className="text-xs text-muted">Trade Gold Futures (GC) and NAS100 Futures (NQ). US-regulated CME exchange.</p>
-                  <div className="px-3 py-2 rounded-xl bg-accent/5 border border-accent/20 text-xs text-muted">
-                    Account ID is shown in Tradovate platform under <span className="text-accent">Account → Account Details</span>
+                <div className="space-y-4">
+                  <div className="p-3 rounded-xl bg-accent/5 border border-accent/20 text-xs text-muted">
+                    Account ID: <span className="text-accent">Tradovate platform → Account → Account Details</span>
                   </div>
-                  <div>
-                    <label className="block text-xs text-muted mb-1.5">Username</label>
-                    <input type="text" value={tradovateUsername} onChange={e => setTradovateUsername(e.target.value)} placeholder="your_tradovate_username" className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-muted mb-1.5">Password</label>
-                    <input type="password" value={tradovatePassword} onChange={e => setTradovatePassword(e.target.value)} placeholder="••••••••" className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-muted mb-1.5">Account ID</label>
-                    <input type="number" value={tradovateAccountId} onChange={e => setTradovateAccountId(e.target.value)} placeholder="12345" className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
-                  </div>
+                  {[
+                    { label: 'Username', val: tradovateUsername, set: setTradovateUsername, placeholder: 'username', type: 'text' },
+                    { label: 'Password', val: tradovatePassword, set: setTradovatePassword, placeholder: '••••••••', type: 'password' },
+                    { label: 'Account ID', val: tradovateAccountId, set: setTradovateAccountId, placeholder: '12345', type: 'number' },
+                  ].map(f => (
+                    <div key={f.label}>
+                      <label className="block text-xs text-muted mb-1.5">{f.label}</label>
+                      <input type={f.type} value={f.val} onChange={e => f.set(e.target.value)} placeholder={f.placeholder}
+                        className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
+                    </div>
+                  ))}
                   <div className="flex gap-2">
-                    <button onClick={saveTradovateKeys} disabled={tradovateKeyLoading} className="px-5 py-2.5 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 transition-colors text-sm font-medium">{tradovateKeyLoading ? 'Saving...' : 'Save Keys'}</button>
-                    {settings?.has_tradovate_keys && <button onClick={testTradovateConnection} disabled={tradovateTestLoading} className="px-4 py-2.5 rounded-xl bg-elevated border border-border hover:border-accent/50 disabled:opacity-50 text-sm font-medium text-muted hover:text-white">{tradovateTestLoading ? 'Testing...' : 'Test Connection'}</button>}
+                    <button onClick={saveTradovateKeys} disabled={tradovateKeyLoading}
+                      className="px-5 py-2.5 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 text-sm font-medium transition-colors">
+                      {tradovateKeyLoading ? 'Saving...' : 'Save Keys'}
+                    </button>
+                    {settings?.has_tradovate_keys && (
+                      <button onClick={testTradovateConnection} disabled={tradovateTestLoading}
+                        className="px-4 py-2.5 rounded-xl bg-elevated border border-border hover:border-accent/50 disabled:opacity-50 text-sm text-muted hover:text-white transition-colors">
+                        {tradovateTestLoading ? 'Testing...' : 'Test Connection'}
+                      </button>
+                    )}
                   </div>
-                  {tradovateTestResult && <div className={`px-3 py-2 rounded-lg text-xs ${tradovateTestResult.ok ? 'bg-profit/10 border border-profit/30 text-profit' : 'bg-loss/10 border border-loss/30 text-loss'}`}>{tradovateTestResult.ok ? '✓ ' : '✗ '}{tradovateTestResult.msg}</div>}
+                  {tradovateTestResult && (
+                    <p className={`text-xs px-3 py-2 rounded-lg ${tradovateTestResult.ok ? 'bg-profit/10 border border-profit/30 text-profit' : 'bg-loss/10 border border-loss/30 text-loss'}`}>
+                      {tradovateTestResult.ok ? '✓ ' : '✗ '}{tradovateTestResult.msg}
+                    </p>
+                  )}
                 </div>
               )}
             </div>
 
-            {/* Bot Settings */}
+            {/* ── Trading Settings ── */}
             <div className="bg-card border border-border rounded-2xl p-5">
-              <h3 className="font-semibold mb-4 text-sm">Trading Settings</h3>
+              <h3 className="font-semibold mb-4">Trading Settings</h3>
               <div className="space-y-4">
-                {/* Broker selector */}
+                {/* Broker */}
                 <div>
                   <label className="block text-xs text-muted mb-1.5">Broker</label>
                   <div className="flex gap-1.5 p-1 bg-elevated rounded-xl">
                     {([
-                      { val: 'robinhood', label: '🪙 Robinhood Crypto' },
+                      { val: 'robinhood', label: '🪙 Robinhood' },
                       { val: 'capital',   label: '📈 Capital.com' },
                       { val: 'tradovate', label: '⚡ Tradovate' },
                     ] as const).map(b => (
                       <button key={b.val} onClick={() => {
                         setFormBroker(b.val)
-                        // Reset symbol to first option for this broker
-                        const first = b.val === 'robinhood' ? 'BTC-USD' : b.val === 'capital' ? 'GOLD' : 'GC'
-                        setFormSymbol(first)
+                        setFormSymbol(b.val === 'robinhood' ? 'BTC-USD' : b.val === 'capital' ? 'GOLD' : 'GC')
                       }}
-                        className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-colors ${formBroker === b.val ? 'bg-accent text-white' : 'text-muted hover:text-white'}`}>
+                        className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-colors ${formBroker === b.val ? 'bg-accent text-white' : 'text-muted hover:text-white'}`}>
                         {b.label}
                       </button>
                     ))}
                   </div>
                 </div>
+
+                {/* Symbol */}
                 <div>
-                  <label className="block text-xs text-muted mb-1.5">Trading Pair / Instrument</label>
-                  <select value={formSymbol} onChange={e => setFormSymbol(e.target.value)} className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm focus:outline-none focus:border-accent">
-                    {formBroker === 'robinhood' && ['BTC-USD', 'ETH-USD', 'SOL-USD', 'DOGE-USD'].map(s => <option key={s} value={s}>{s}</option>)}
-                    {formBroker === 'capital' && [
-                      { v: 'GOLD',  l: 'Gold (XAU/USD) — CFD' },
-                      { v: 'US100', l: 'NASDAQ 100 (US100) — CFD' },
-                    ].map(s => <option key={s.v} value={s.v}>{s.l}</option>)}
-                    {formBroker === 'tradovate' && [
-                      { v: 'GC', l: 'Gold Futures (GC)' },
-                      { v: 'NQ', l: 'NASDAQ 100 Futures (NQ)' },
-                    ].map(s => <option key={s.v} value={s.v}>{s.l}</option>)}
+                  <label className="block text-xs text-muted mb-1.5">Instrument</label>
+                  <select value={formSymbol} onChange={e => setFormSymbol(e.target.value)}
+                    className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm focus:outline-none focus:border-accent">
+                    {formBroker === 'robinhood' && ['BTC-USD', 'ETH-USD', 'SOL-USD', 'DOGE-USD'].map(s => <option key={s}>{s}</option>)}
+                    {formBroker === 'capital' && [{ v: 'GOLD', l: 'Gold (XAU/USD)' }, { v: 'US100', l: 'NASDAQ 100' }].map(s => <option key={s.v} value={s.v}>{s.l}</option>)}
+                    {formBroker === 'tradovate' && [{ v: 'GC', l: 'Gold Futures (GC)' }, { v: 'NQ', l: 'NAS100 Futures (NQ)' }].map(s => <option key={s.v} value={s.v}>{s.l}</option>)}
                   </select>
                 </div>
-                {/* Strategy presets by asset class */}
+
+                {/* Quick presets */}
                 <div>
-                  <label className="block text-xs text-muted mb-1.5">Strategy Preset</label>
-                  <div className="flex gap-2 flex-wrap">
+                  <label className="block text-xs text-muted mb-1.5">Quick Preset</label>
+                  <div className="flex flex-wrap gap-2">
                     {formBroker === 'robinhood' && (
-                      <button onClick={() => { setFormStopLoss(0.025); setFormTakeProfit(0.05); setFormTrailStop(0.015) }}
+                      <button onClick={() => { setFormStopLoss(0.005); setFormTakeProfit(0.02); setFormTrailStop(0.005) }}
                         className="px-3 py-1.5 text-xs rounded-lg bg-elevated border border-border hover:border-accent/50 text-muted hover:text-white transition-colors">
-                        Crypto defaults (SL 2.5% / TP 5%)
+                        Crypto (SL 0.5% / TP 2%)
                       </button>
                     )}
-                    {(formBroker === 'capital' || formBroker === 'tradovate') && [
-                      { label: 'Gold defaults', sl: 0.008, tp: 0.016, trail: 0.005 },
-                      { label: 'NAS100 defaults', sl: 0.005, tp: 0.012, trail: 0.004 },
+                    {formBroker !== 'robinhood' && [
+                      { label: 'Gold (SL 0.8% / TP 1.6%)', sl: 0.008, tp: 0.016, trail: 0.005 },
+                      { label: 'NAS100 (SL 0.5% / TP 1.2%)', sl: 0.005, tp: 0.012, trail: 0.004 },
                     ].map(p => (
                       <button key={p.label} onClick={() => { setFormStopLoss(p.sl); setFormTakeProfit(p.tp); setFormTrailStop(p.trail) }}
                         className="px-3 py-1.5 text-xs rounded-lg bg-elevated border border-border hover:border-accent/50 text-muted hover:text-white transition-colors">
-                        {p.label} (SL {(p.sl * 100).toFixed(1)}% / TP {(p.tp * 100).toFixed(1)}%)
+                        {p.label}
                       </button>
                     ))}
                   </div>
                 </div>
+
+                {/* SL / TP / Trail */}
                 <div className="grid grid-cols-3 gap-3">
                   {[
-                    { label: 'Stop Loss %', val: formStopLoss, set: setFormStopLoss, step: 0.005, min: 0.005, max: 0.1 },
-                    { label: 'Take Profit %', val: formTakeProfit, set: setFormTakeProfit, step: 0.005, min: 0.005, max: 0.2 },
-                    { label: 'Trail Stop %', val: formTrailStop, set: setFormTrailStop, step: 0.005, min: 0.005, max: 0.05 },
-                  ].map((f, i) => (
-                    <div key={i}><label className="block text-xs text-muted mb-1.5">{f.label}</label>
-                      <input type="number" step={f.step} min={f.min} max={f.max} value={f.val} onChange={e => f.set(parseFloat(e.target.value))} className="w-full px-3 py-2 rounded-xl bg-elevated border border-border text-white text-sm focus:outline-none focus:border-accent" />
+                    { label: 'Stop Loss %', val: formStopLoss, set: setFormStopLoss, step: 0.005 },
+                    { label: 'Take Profit %', val: formTakeProfit, set: setFormTakeProfit, step: 0.005 },
+                    { label: 'Trail Stop %', val: formTrailStop, set: setFormTrailStop, step: 0.005 },
+                  ].map(f => (
+                    <div key={f.label}>
+                      <label className="block text-xs text-muted mb-1.5">{f.label}</label>
+                      <input type="number" step={f.step} min={0.005} value={f.val}
+                        onChange={e => f.set(parseFloat(e.target.value))}
+                        className="w-full px-3 py-2 rounded-xl bg-elevated border border-border text-white text-sm focus:outline-none focus:border-accent" />
+                      <p className="text-xs text-muted/60 mt-1">{(f.val * 100).toFixed(1)}%</p>
                     </div>
                   ))}
                 </div>
-                <div className="px-3 py-2 rounded-xl bg-accent/5 border border-accent/20 text-xs text-muted">
-                  Our AI-powered strategy uses multiple market signals to find optimal entry and exit points. All advanced filters are active by default to protect your trades.
-                </div>
+
+                <button onClick={requestSaveSettings} disabled={settingsLoading}
+                  className="w-full py-3 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 font-semibold text-sm transition-colors">
+                  {settingsLoading ? 'Saving...' : 'Save Settings'}
+                </button>
               </div>
             </div>
 
-            {/* Risk Management */}
+            {/* ── Notifications ── */}
             <div className="bg-card border border-border rounded-2xl p-5">
-              <h3 className="font-semibold mb-4 text-sm">Risk Management</h3>
-              <div className="space-y-4">
-                <div className="grid grid-cols-2 gap-3">
-                  <div><label className="block text-xs text-muted mb-1.5">Max Daily Drawdown %</label><input type="number" step={0.5} min={1} max={20} value={formMaxDrawdown} onChange={e => setFormMaxDrawdown(parseFloat(e.target.value))} className="w-full px-3 py-2 rounded-xl bg-elevated border border-border text-white text-sm focus:outline-none focus:border-accent" /></div>
-                  <div><label className="block text-xs text-muted mb-1.5">Max Stop-Losses (before pause)</label><input type="number" step={1} min={1} max={10} value={formMaxStops} onChange={e => setFormMaxStops(parseInt(e.target.value))} className="w-full px-3 py-2 rounded-xl bg-elevated border border-border text-white text-sm focus:outline-none focus:border-accent" /></div>
-                  <div><label className="block text-xs text-muted mb-1.5">Cooldown Ticks (after SL)</label><input type="number" step={1} min={0} max={20} value={formCooldown} onChange={e => setFormCooldown(parseInt(e.target.value))} className="w-full px-3 py-2 rounded-xl bg-elevated border border-border text-white text-sm focus:outline-none focus:border-accent" /></div>
-                  <div><label className="block text-xs text-muted mb-1.5">Risk per Trade %</label><input type="number" step={0.25} min={0.25} max={5} value={formRiskPerTrade} onChange={e => setFormRiskPerTrade(parseFloat(e.target.value))} className="w-full px-3 py-2 rounded-xl bg-elevated border border-border text-white text-sm focus:outline-none focus:border-accent" /></div>
-                  <div className="col-span-2"><label className="block text-xs text-muted mb-1.5">Max Single Position Exposure %</label><input type="number" step={5} min={5} max={100} value={formMaxExposure} onChange={e => setFormMaxExposure(parseFloat(e.target.value))} className="w-full px-3 py-2 rounded-xl bg-elevated border border-border text-white text-sm focus:outline-none focus:border-accent" /></div>
-                </div>
-              </div>
-            </div>
-
-            {/* Position Sizing */}
-            <div className="bg-card border border-border rounded-2xl p-5">
-              <h3 className="font-semibold mb-4 text-sm">Position Sizing</h3>
-              <div className="space-y-4">
-                <div className="flex gap-3">
-                  {[
-                    { label: 'Smart Sizing (recommended)', val: 'dynamic' },
-                    { label: 'Fixed Quantity', val: 'fixed' },
-                  ].map(opt => (
-                    <label key={opt.val} className={`flex-1 p-3 rounded-xl border cursor-pointer text-center text-xs font-semibold transition-colors ${formPosMode === opt.val ? 'border-accent/50 bg-accent/10 text-accent' : 'border-border bg-elevated text-muted hover:text-white'}`}>
-                      <input type="radio" name="posMode" value={opt.val} checked={formPosMode === opt.val} onChange={() => setFormPosMode(opt.val)} className="sr-only" />
-                      {opt.label}
-                    </label>
-                  ))}
-                </div>
-                {formPosMode === 'fixed' && (
-                  <div>
-                    <label className="block text-xs text-muted mb-1.5">Fixed Quantity (e.g. 0.0001 BTC)</label>
-                    <input type="number" step={0.0001} min={0.0001} max={1} value={formFixedQty} onChange={e => setFormFixedQty(parseFloat(e.target.value))} className="w-full px-3 py-2 rounded-xl bg-elevated border border-border text-white text-sm font-mono focus:outline-none focus:border-accent" />
-                  </div>
-                )}
-                {formPosMode === 'dynamic' && (
-                  <div className="px-3 py-2 rounded-xl bg-elevated text-xs text-muted">
-                    Automatically calculates optimal position size based on your risk settings and market volatility. Capped at {formMaxExposure}% exposure.
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Demo Balance */}
-            <div className="bg-card border border-border rounded-2xl p-5">
-              <h3 className="font-semibold mb-4 text-sm flex items-center gap-2">Demo Balance <span className="text-xs text-warning font-normal">Paper trading</span></h3>
-              <div className="flex items-end gap-3">
-                <div className="flex-1">
-                  <label className="block text-xs text-muted mb-1.5">Starting Balance ($)</label>
-                  <input type="number" value={demoBalanceInput} onChange={e => setDemoBalanceInput(e.target.value)} min={0} step={1000} className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm font-mono focus:outline-none focus:border-accent" />
-                </div>
-                <button onClick={async () => {
-                  setDemoBalanceLoading(true)
-                  try { const res = await api.post('/api/bot/demo-balance', { balance: parseFloat(demoBalanceInput) || 10000 }); setLiveDemoBalance(res.data.balance); showToast(`Demo balance set to $${res.data.balance.toLocaleString()}`); await loadData() }
-                  catch { showToast('Failed to set balance', false) }
-                  finally { setDemoBalanceLoading(false) }
-                }} disabled={demoBalanceLoading} className="px-4 py-2.5 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 text-sm font-medium">{demoBalanceLoading ? 'Setting...' : 'Set Balance'}</button>
-                <button onClick={async () => {
-                  if (!confirm('Reset demo balance to $10,000 and clear all demo trades?')) return
-                  setDemoBalanceLoading(true)
-                  try { const res = await api.post('/api/bot/demo-balance/clear'); setLiveDemoBalance(res.data.balance); setDemoBalanceInput('10000'); showToast('Demo reset'); await loadData() }
-                  catch { showToast('Failed to reset', false) }
-                  finally { setDemoBalanceLoading(false) }
-                }} disabled={demoBalanceLoading} className="px-4 py-2.5 rounded-xl bg-loss/15 border border-loss/40 text-loss hover:bg-loss/25 disabled:opacity-50 text-sm font-medium">Clear All</button>
-              </div>
-            </div>
-
-            {/* AI & Pro */}
-            <div className={`bg-card border rounded-2xl p-5 ${isPremium ? 'border-purple-500/30' : 'border-border'}`}>
-              <h3 className="font-semibold mb-1 text-sm flex items-center gap-2">
-                AI &amp; Auto-Calibration
-                {isPremium
-                  ? <span className="text-xs px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-400 border border-purple-500/30 font-semibold">PRO Active</span>
-                  : <span className="text-xs text-muted">Free tier</span>}
-              </h3>
-              {isPremium ? (
-                <div className="space-y-3 mt-3">
-                  <div className="px-3 py-2 rounded-xl bg-purple-500/10 border border-purple-500/20 text-xs text-purple-300">
-                    AI-powered trading is active. Claude screens every signal before entry, classifies market regime in real-time, learns from your trade patterns, and auto-calibrates strategy parameters after every closed trade.
-                    {premiumData?.calibration_count > 0 && <span className="block mt-1 text-muted">Total calibrations: <strong className="text-purple-400">{premiumData.calibration_count}</strong></span>}
-                  </div>
-                  <div className="flex gap-2">
-                    <button onClick={manageSubscription} className="flex-1 py-2 rounded-xl border border-purple-500/30 text-purple-400 hover:bg-purple-500/10 text-xs font-medium transition-colors">Manage Billing</button>
-                    <button onClick={deactivatePremium} disabled={premiumLoading} className="flex-1 py-2 rounded-xl border border-loss/30 text-loss/70 hover:text-loss hover:border-loss/50 text-xs transition-colors">{premiumLoading ? '...' : 'Cancel Subscription'}</button>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-3 mt-3">
-                  <p className="text-xs text-muted">AI-powered trade analysis and auto-calibration. Your bot learns from every trade and automatically optimizes for better profitability.</p>
-                  <button onClick={() => setShowPremiumModal(true)} className="w-full py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 transition-colors text-sm font-semibold shadow-lg shadow-purple-600/20">Upgrade to Nalo.Ai Pro &mdash; $199/mo</button>
-                </div>
-              )}
-            </div>
-
-            {/* Telegram */}
-            <div className="bg-card border border-border rounded-2xl p-5">
-              <h3 className="font-semibold mb-1 text-sm flex items-center gap-2">Telegram Notifications {settings?.telegram_configured ? <span className="text-xs text-profit">configured</span> : <span className="text-xs text-muted">not set up</span>}</h3>
-              <p className="text-xs text-muted mb-4">Get trade alerts on Telegram. Create a bot via @BotFather and get your chat ID.</p>
+              <h3 className="font-semibold mb-4">📱 Telegram Notifications</h3>
               <div className="space-y-3">
-                <input type="text" value={telegramToken} onChange={e => setTelegramToken(e.target.value)} placeholder="Bot token from @BotFather" className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
-                <input type="text" value={telegramChatId} onChange={e => setTelegramChatId(e.target.value)} placeholder="Chat ID" className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
-                <div className="flex gap-2">
-                  <button onClick={saveTelegram} disabled={telegramLoading} className="px-4 py-2.5 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 text-sm font-medium">{telegramLoading ? 'Saving...' : 'Save'}</button>
-                  {settings?.telegram_configured && <button onClick={testTelegram} disabled={telegramLoading} className="px-4 py-2.5 rounded-xl bg-elevated border border-border hover:border-accent/50 disabled:opacity-50 text-sm font-medium text-muted hover:text-white">{telegramLoading ? '...' : 'Send Test'}</button>}
+                <div>
+                  <label className="block text-xs text-muted mb-1.5">Bot Token</label>
+                  <input type="text" value={telegramToken} onChange={e => setTelegramToken(e.target.value)} placeholder="1234567890:ABC..."
+                    className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
                 </div>
-                <label className="flex items-center gap-2 text-xs cursor-pointer">
-                  <input type="checkbox" checked={formTelegramEnabled} onChange={e => setFormTelegramEnabled(e.target.checked)} className="w-4 h-4 rounded accent-accent" />
-                  <span className="text-muted">Enable Telegram alerts for trades</span>
-                </label>
+                <div>
+                  <label className="block text-xs text-muted mb-1.5">Chat ID</label>
+                  <input type="text" value={telegramChatId} onChange={e => setTelegramChatId(e.target.value)} placeholder="-100..."
+                    className="w-full px-3 py-2.5 rounded-xl bg-elevated border border-border text-white text-sm placeholder-muted/40 focus:outline-none focus:border-accent" />
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={saveTelegram} disabled={telegramLoading}
+                    className="px-5 py-2.5 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 text-sm font-medium transition-colors">
+                    {telegramLoading ? 'Saving...' : 'Save'}
+                  </button>
+                  {settings?.telegram_configured && (
+                    <button onClick={testTelegram} disabled={telegramLoading}
+                      className="px-4 py-2.5 rounded-xl bg-elevated border border-border hover:border-accent/50 text-sm text-muted hover:text-white transition-colors">
+                      Send Test
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
 
-            {/* Save All Settings */}
-            <div className="lg:col-span-2">
-              <button onClick={requestSaveSettings} disabled={settingsLoading} className="w-full py-3 rounded-xl bg-accent hover:bg-blue-500 disabled:opacity-50 transition-colors text-sm font-semibold">{settingsLoading ? 'Saving...' : 'Save All Settings'}</button>
+            {/* ── Account ── */}
+            <div className="bg-card border border-border rounded-2xl p-5">
+              <h3 className="font-semibold mb-4">Account</h3>
+              <div className="flex items-center justify-between py-3 border-b border-border/50">
+                <div>
+                  <p className="text-sm font-medium">{user?.email}</p>
+                  <p className="text-xs text-muted mt-0.5">{isPremium ? 'Nalo.Ai Pro' : 'Free Plan'}</p>
+                </div>
+                {isPremium
+                  ? <button onClick={manageSubscription} className="text-xs px-3 py-1.5 rounded-lg border border-border text-muted hover:text-white transition-colors">Manage Plan</button>
+                  : <button onClick={() => setShowPremiumModal(true)} className="text-xs px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-semibold transition-colors">Upgrade</button>
+                }
+              </div>
+              <button onClick={handleLogout} className="mt-4 text-xs text-muted hover:text-loss transition-colors">Sign out</button>
             </div>
           </div>
         )}
-
       </main>
 
-      {/* Premium Upgrade Modal */}
-      {showPremiumModal && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" onClick={() => setShowPremiumModal(false)}>
-          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
-          <div className="relative bg-card border border-purple-500/30 rounded-2xl p-6 w-full max-w-lg shadow-2xl" onClick={e => e.stopPropagation()}>
-            <div className="text-center mb-6">
-              <span className="text-4xl block mb-3">&#x1f9e0;</span>
-              <h2 className="text-xl font-bold" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>Upgrade to Nalo.Ai Pro</h2>
-              <p className="text-muted text-sm mt-1">Your bot learns and improves with every trade</p>
+      {/* ── Confirm Modal ── */}
+      {showConfirm && pendingSettings && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 px-4">
+          <div className="bg-card border border-border rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+            <h3 className="font-bold text-base mb-3">Save Settings?</h3>
+            <div className="space-y-2 text-sm text-muted mb-5">
+              <div className="flex justify-between"><span>Broker</span><span className="text-white font-medium">{pendingSettings.broker_type}</span></div>
+              <div className="flex justify-between"><span>Symbol</span><span className="text-white font-medium">{pendingSettings.trading_symbol}</span></div>
+              <div className="flex justify-between"><span>Stop Loss</span><span className="text-white font-medium">{(pendingSettings.stop_loss_pct * 100).toFixed(1)}%</span></div>
+              <div className="flex justify-between"><span>Take Profit</span><span className="text-white font-medium">{(pendingSettings.take_profit_pct * 100).toFixed(1)}%</span></div>
             </div>
-
-            <div className="space-y-3 mb-6">
-              {[
-                { icon: '&#x1f9e0;', title: 'AI Pre-Trade Screening', desc: 'Claude reviews every signal before entry — blocks bad setups, approves high-confidence trades' },
-                { icon: '&#x1f4ca;', title: 'AI Trade Analysis', desc: 'Every closed trade graded with entry/exit quality, actionable feedback, and pattern detection' },
-                { icon: '&#x2699;&#xfe0f;', title: 'Auto-Calibration + Quantum Optimizer', desc: 'Strategy parameters auto-tuned by both AI reasoning and quantum-inspired optimization' },
-                { icon: '&#x1f9ec;', title: 'AI Pattern Memory', desc: 'Claude remembers which setups fail for you — blocks losing patterns before they repeat' },
-                { icon: '&#x1f30d;', title: 'Market Regime Detection', desc: 'AI classifies trending vs ranging markets in real-time, adjusts strategy accordingly' },
-                { icon: '&#x1f6e1;&#xfe0f;', title: 'Institutional Risk Management', desc: 'ATR-adaptive stops, signal-strength sizing, multi-timeframe confirmation, ETH correlation' },
-              ].map((f, i) => (
-                <div key={i} className="flex items-start gap-3 p-3 rounded-xl bg-elevated">
-                  <span className="text-lg flex-shrink-0" dangerouslySetInnerHTML={{ __html: f.icon }} />
-                  <div>
-                    <p className="text-sm font-semibold">{f.title}</p>
-                    <p className="text-xs text-muted">{f.desc}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="text-center mb-5">
-              <span className="text-3xl font-bold" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>$199</span>
-              <span className="text-muted text-sm"> /month</span>
-            </div>
-
             <div className="flex gap-3">
-              <button onClick={() => setShowPremiumModal(false)} className="flex-1 py-2.5 rounded-xl border border-border text-muted hover:text-white text-sm transition-colors">Maybe Later</button>
-              <button onClick={activatePremium} disabled={premiumLoading} className="flex-1 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-sm font-semibold transition-colors shadow-lg shadow-purple-600/20">
-                {premiumLoading ? 'Activating...' : 'Activate Pro'}
-              </button>
+              <button onClick={() => setShowConfirm(false)} className="flex-1 py-2.5 rounded-xl border border-border text-sm text-muted hover:text-white transition-colors">Cancel</button>
+              <button onClick={confirmSaveSettings} className="flex-1 py-2.5 rounded-xl bg-accent hover:bg-blue-500 text-sm font-semibold transition-colors">Confirm</button>
             </div>
-
-            <p className="text-xs text-center text-muted mt-3">Cancel anytime from Settings. Stripe integration coming soon.</p>
           </div>
         </div>
       )}
 
-      {/* Settings Confirmation Modal */}
-      {showConfirm && pendingSettings && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" onClick={() => setShowConfirm(false)}>
-          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
-          <div className="relative bg-card border border-border rounded-2xl p-6 w-full max-w-md shadow-2xl max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <h3 className="font-semibold text-sm mb-4">Confirm Settings Change</h3>
-            <div className="space-y-1.5 mb-5 text-xs">
-              {Object.entries(pendingSettings).filter(([, v]) => typeof v !== 'boolean').map(([k, v]) => (
-                <div key={k} className="flex justify-between px-3 py-1.5 rounded-lg bg-elevated">
-                  <span className="text-muted">{k.replace(/_/g, ' ')}</span>
-                  <span className="font-semibold font-mono">{typeof v === 'number' ? (v < 1 ? `${(v * 100).toFixed(1)}%` : v) : String(v)}</span>
-                </div>
-              ))}
-              <div className="mt-2 pt-2 border-t border-border">
-                <p className="text-muted mb-1">Active Filters</p>
-                <div className="flex flex-wrap gap-1">
-                  {Object.entries(pendingSettings).filter(([k, v]) => typeof v === 'boolean' && v && k.startsWith('use_')).map(([k]) => (
-                    <span key={k} className="px-2 py-0.5 rounded bg-accent/15 text-accent text-xs">{k.replace('use_', '').replace('_filter', '').toUpperCase()}</span>
-                  ))}
-                </div>
+      {/* ── Premium Modal ── */}
+      {showPremiumModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 px-4">
+          <div className="bg-card border border-purple-500/30 rounded-2xl p-6 max-w-md w-full shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <span className="text-3xl">🧠</span>
+              <div>
+                <h3 className="font-bold text-lg">Nalo.Ai Pro</h3>
+                <p className="text-sm text-muted">AI-powered auto-calibration</p>
               </div>
             </div>
+            <div className="space-y-2 mb-5">
+              {[
+                'AI analyses every trade after it closes',
+                'Strategy parameters auto-calibrate for better returns',
+                'Your bot improves with every trade, automatically',
+                'Priority support',
+              ].map((f, i) => (
+                <div key={i} className="flex items-center gap-2 text-sm">
+                  <span className="text-profit">✓</span>
+                  <span>{f}</span>
+                </div>
+              ))}
+            </div>
             <div className="flex gap-3">
-              <button onClick={() => setShowConfirm(false)} className="flex-1 py-2.5 rounded-xl border border-border text-muted hover:text-white text-sm transition-colors">Cancel</button>
-              <button onClick={confirmSaveSettings} className="flex-1 py-2.5 rounded-xl bg-accent hover:bg-blue-500 text-sm font-semibold transition-colors">Confirm Save</button>
+              <button onClick={() => setShowPremiumModal(false)} className="flex-1 py-2.5 rounded-xl border border-border text-sm text-muted hover:text-white transition-colors">Cancel</button>
+              <button onClick={activatePremium} disabled={premiumLoading}
+                className="flex-1 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-sm font-semibold transition-colors shadow-lg shadow-purple-600/20">
+                {premiumLoading ? 'Loading...' : 'Upgrade — $199/mo'}
+              </button>
             </div>
           </div>
         </div>
