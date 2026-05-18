@@ -286,6 +286,13 @@ async def get_settings(current_user: User = Depends(get_current_user)):
         # Telegram
         "telegram_enabled": getattr(current_user, 'telegram_enabled', False),
         "telegram_configured": bool(os.getenv("TELEGRAM_BOT_TOKEN")) and bool(os.getenv("TELEGRAM_CHAT_ID")),
+        # Signal parameters
+        "entry_z": getattr(current_user, 'entry_z', 1.3),
+        "use_rsi_filter": getattr(current_user, 'use_rsi_filter', True),
+        "use_bbands_filter": getattr(current_user, 'use_bbands_filter', True),
+        "use_adx_filter": getattr(current_user, 'use_adx_filter', True),
+        "use_ema_filter": getattr(current_user, 'use_ema_filter', False),
+        "use_macd_filter": getattr(current_user, 'use_macd_filter', False),
         # Premium
         "is_premium": getattr(current_user, 'is_premium', False),
         # Capital.com independent bot
