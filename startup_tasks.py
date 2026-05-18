@@ -65,23 +65,40 @@ async def apply_profit_params() -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. PRO BOOST — aggressive sizing for premium users
+# 2. PRO BOOST — aggressive sizing + signal reset for premium users
 # ─────────────────────────────────────────────────────────────────────────────
 
 # PRO users have proven 65-69% win rate. Bump risk/exposure for larger P&L.
 # Math: 65% win × 30 trades/day × $2,500 notional × 1% net edge ≈ $487/day
+#
+# CRITICAL: entry_z is reset to 1.3 every deploy to prevent the AI calibrator
+# from over-tightening it after a bad session. After 11 losses the calibrator
+# pushed entry_z toward 3.5 — signals became so rare the bot stopped trading.
+# 1.3 gives ~6-12 signal opportunities per day per symbol; calibrator fine-tunes
+# from there but startup always pulls it back to a tradeable baseline.
+#
+# BBands filter disabled: the breakout/retest signal fires when price is ABOVE
+# the mean (positive z) — exactly where BBands %B > 0.8 lives. Keeping BBands
+# ON blocks the very entries the signal generator is designed to catch.
 PRO_BOOST = dict(
+    entry_z=1.3,
     risk_per_trade_pct=3.5,
     max_exposure_pct=70.0,
     stop_loss_pct=0.005,
-    take_profit_pct=0.015,
+    take_profit_pct=0.020,   # 4:1 R/R vs SL → realistic daily target
     trail_stop_pct=0.004,
     cooldown_ticks=1,
+    use_rsi_filter=False,    # RSI > 70 was blocking strong upside breakouts
+    use_bbands_filter=False, # BBands contradicts breakout-retest signal logic
+    use_adx_filter=True,     # keep: blocks entries during extreme trends
+    use_ema_filter=False,
+    use_macd_filter=False,
+    max_stops_before_pause=5,
 )
 
 
 async def apply_pro_boost() -> int:
-    """Apply PRO sizing to all premium users. Returns rows affected."""
+    """Apply PRO sizing + reset signal params for premium users. Returns rows affected."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             update(User).where(User.is_premium == True).values(**PRO_BOOST)
@@ -90,7 +107,7 @@ async def apply_pro_boost() -> int:
     n = result.rowcount
     logger.info(
         f"Startup: PRO BOOST → {n} premium users | "
-        "risk=3.5% exposure=70% TP=1.5% trail=0.4% cooldown=1"
+        "entry_z=1.3 risk=3.5% exposure=70% TP=2% trail=0.4% RSI/BB filters OFF"
     )
     return n
 
