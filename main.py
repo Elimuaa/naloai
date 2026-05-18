@@ -1,308 +1,70 @@
+"""
+main.py — Nalo.Ai application entry point.
+
+Responsibilities:
+  - FastAPI app + CORS
+  - WebSocket endpoint
+  - Lifespan: DB init, startup tasks, graceful shutdown
+  - Static file serving for React SPA
+
+All startup logic lives in startup_tasks.py.
+All route logic lives in routers/.
+"""
+
 import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-load_dotenv()  # Load .env before anything else reads env vars
+load_dotenv()
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from database import init_db, AsyncSessionLocal, User
-from sqlalchemy import select
+
+from database import init_db, AsyncSessionLocal
 from auth import get_current_user_ws
 from ws_manager import ws_manager
-from bot_engine import start_bot, _bot_tasks, graceful_shutdown_close_all_demo_positions
+from bot_engine import _bot_tasks, graceful_shutdown_close_all_demo_positions
 from scheduler import start_scheduler
-from routers import auth_router, bot_router, trades_router, reports_router, market_router, admin_router, stripe_router
+from startup_tasks import run_all
 from health_monitor import run_full_health_check, get_health_history
+from routers import (
+    auth_router, bot_router, trades_router,
+    reports_router, market_router, admin_router, stripe_router,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+# ── Lifespan ──────────────────────────────────────────────────────────────────
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Startup
     from robinhood import sync_clock_offset
-    await sync_clock_offset()  # Correct for system clock drift before any Robinhood calls
+    await sync_clock_offset()
     await init_db()
     start_scheduler()
+    await run_all()
 
-    # ── Startup migration: apply profit-optimised settings to all users ──────
-    # Runs on every deploy. Upgrades any user still on old conservative values.
-    # Target: $200-300/day on a $10k account via 40% max exposure + 2% risk/trade.
-    from sqlalchemy import update as _up
-    # ── SCALP MODE: $5–20 z-revert wins + occasional TP at 2% ──────────────────
-    # Math: 0.5% SL, 2% TP = 4:1 R/R on TP hits.
-    # Z-revert fires when unrealised PnL >= $15 → avg $15-35 win.
-    # With 60% exposure on $10k = $6k deployed → 0.079 BTC position:
-    #   SL loss  = 0.079 × $76k × 0.005 = $30
-    #   TP win   = 0.079 × $76k × 0.020 = $120
-    #   Z-revert = $15–40 (fires after meaningful move, not $0.24 noise)
-    # Target: 15 z-revert wins × $20 + 2 TP hits × $120 − 4 SL × $30 = $420/day
-    PROFIT_PARAMS = dict(
-        entry_z=1.1,                # lower threshold → more entries (was 1.3)
-        stop_loss_pct=0.005,        # 0.5% SL — tight enough to protect, wide enough for BTC noise
-        take_profit_pct=0.020,      # 2.0% TP — reachable intraday (was 5% — rarely hit)
-        trail_stop_pct=0.005,       # 0.5% trail — locks in wins as price moves (was 2%)
-        use_rsi_filter=True,
-        use_ema_filter=False,
-        use_adx_filter=True,
-        use_bbands_filter=True,
-        use_macd_filter=False,
-        max_drawdown_pct=8.0,
-        max_stops_before_pause=5,   # allow 5 stops before pause (more room at tighter SL)
-        cooldown_ticks=2,           # re-enter fast — scalp needs quick reloading
-        risk_per_trade_pct=2.5,     # 2.5% risk per trade (was 2%)
-        max_exposure_pct=60.0,      # 60% max exposure → bigger positions (was 40%)
-        position_size_mode="dynamic",
-    )
-    async with AsyncSessionLocal() as db:
-        # Only apply defaults to users who have NEVER been AI-calibrated.
-        # calibration_count == 0 means the AI optimizer hasn't tuned them yet.
-        # This preserves hard-won calibrated parameters across deploys — previously
-        # every redeploy silently wiped AI-calibrated settings for every user.
-        result = await db.execute(
-            _up(User)
-            .where(User.calibration_count == 0)
-            .values(**PROFIT_PARAMS)
-        )
-        affected = result.rowcount
-        await db.commit()
-    logger.info(
-        f"Startup: SCALP MODE applied to {affected} uncalibrated users "
-        "(calibrated users preserved) — "
-        "SL=0.5%, TP=2% (4:1 R/R), trail=0.5%, z-revert min=$15, "
-        "entry_z=1.1, risk=2.5%, exposure=60%, target=$200+/day"
-    )
-
-    # ── PRO BOOST: aggressive sizing for premium users to hit $200-300/day target ──
-    # PRO users have proven 65-69% win rate but realised P&L was only $0.30/trade
-    # because position size was capped too tight (10% of account). Bump to 3.5%
-    # risk / 70% max exposure → ~3× position size on the same proven setups.
-    # Math at 65% win rate × 30 trades/day × $2,500 notional × 1% net edge = ~$487/day.
-    # Demo bypass also bumped to 50% (from 30%) gated by is_premium downstream.
-    PRO_BOOST = dict(
-        risk_per_trade_pct=3.5,     # was 2.5 → 1.4× per-trade risk
-        max_exposure_pct=70.0,      # was 60 → 1.17× max exposure
-        stop_loss_pct=0.005,        # tight 0.5% SL preserved
-        take_profit_pct=0.015,      # 3:1 R/R (was 2:1) — let winners run
-        trail_stop_pct=0.004,       # tighter trail to lock 3:1 wins
-        cooldown_ticks=1,           # near-instant re-entry on PRO
-    )
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            _up(User).where(User.is_premium == True).values(**PRO_BOOST)
-        )
-        pro_affected = result.rowcount
-        await db.commit()
-    logger.info(
-        f"Startup: PRO BOOST applied to {pro_affected} premium users — "
-        "risk=3.5%, exposure=70%, TP=1.5% (3:1 R/R), trail=0.4%, cooldown=1tick. "
-        "Targeting $200-300/day per $10k PRO account."
-    )
-
-    # ── One-shot corruption recovery ────────────────────────────────────────
-    # The previous mock-client short bug (d713744) credited free proceeds on
-    # every sell-to-open, compounding into quintillion-dollar demo balances and
-    # quintillion-coin "open" trades. Detect and reset any account where the
-    # numbers are obviously impossible: balance > $1M, or an open trade with
-    # absurd quantity / size. Force-close those trades, reset balance to $10k,
-    # and wipe risk_state so position sizing starts clean.
-    from database import Trade as _Trade, RiskState as _RiskState
-    from sqlalchemy import or_ as _or
-    CORRUPT_BALANCE_THRESHOLD = 1_000_000.0  # $1M — well above any plausible demo gain
-    CORRUPT_QTY_THRESHOLD = 10_000.0          # >10k units of any symbol is impossible from $10k seed
-    async with AsyncSessionLocal() as db:
-        # 1) Users with corrupt demo balance
-        corrupt_users_q = await db.execute(
-            select(User).where(User.demo_balance > CORRUPT_BALANCE_THRESHOLD)
-        )
-        corrupt_users = list(corrupt_users_q.scalars().all())
-
-        # 2) Users with absurd-quantity open demo trades (catch corruption that
-        #    didn't yet reflect in demo_balance — e.g. mid-trade snapshot)
-        bad_trade_users_q = await db.execute(
-            select(_Trade.user_id).where(
-                _Trade.state == "open",
-                _Trade.is_demo == True,
-                _Trade.quantity_value > CORRUPT_QTY_THRESHOLD,
-            ).distinct()
-        )
-        bad_trade_user_ids = {row[0] for row in bad_trade_users_q.all()}
-        if bad_trade_user_ids:
-            extra_q = await db.execute(select(User).where(User.id.in_(bad_trade_user_ids)))
-            existing_ids = {u.id for u in corrupt_users}
-            for u in extra_q.scalars().all():
-                if u.id not in existing_ids:
-                    corrupt_users.append(u)
-
-        for cu in corrupt_users:
-            # Force-close all open trades (demo or live) for this user — any
-            # leftover open trades with corrupt quantities will crash the loop.
-            await db.execute(
-                _Trade.__table__.update()
-                .where(_Trade.user_id == cu.id, _Trade.state == "open")
-                .values(state="closed", exit_reason="corruption_recovery", pnl=0.0, pnl_pct=0.0)
-            )
-            # Reset balance + bot flag so user has a clean slate.
-            await db.execute(
-                _up(User).where(User.id == cu.id).values(
-                    demo_balance=10000.0,
-                    bot_active=False,  # require user to manually restart so they see it
-                )
-            )
-            # Wipe risk-state snapshot so daily P&L / cooldown start fresh.
-            await db.execute(
-                _RiskState.__table__.delete().where(_RiskState.user_id == cu.id)
-            )
-            logger.warning(
-                f"CORRUPTION RECOVERY: user {cu.id[:8]} reset — "
-                f"old_balance=${cu.demo_balance:,.2f}, bot stopped, balance=$10000.00"
-            )
-        if corrupt_users:
-            await db.commit()
-            logger.warning(f"Reset {len(corrupt_users)} corrupted demo accounts")
-
-        # 3) Scrub absurd historical P&L values on closed trades. The corruption
-        #    bug stamped phantom-trillion P&L into Trade.pnl rows that are now
-        #    polluting platform-wide aggregates (all-time / 7d / 30d).
-        #    Any single trade with |pnl| > $100k on a $10k demo seed is
-        #    definitionally corrupt — zero those out (preserve trade record for
-        #    audit, but neutralize the fake numbers in aggregates).
-        from sqlalchemy import or_ as __or
-        ABSURD_PNL_THRESHOLD = 100_000.0
-        scrub = await db.execute(
-            _Trade.__table__.update()
-            .where(__or(
-                _Trade.pnl > ABSURD_PNL_THRESHOLD,
-                _Trade.pnl < -ABSURD_PNL_THRESHOLD,
-            ))
-            .values(pnl=0.0, pnl_pct=0.0, partial_pnl=0.0)
-        )
-        if scrub.rowcount:
-            await db.commit()
-            logger.warning(
-                f"Scrubbed {scrub.rowcount} corrupted historical trade P&L rows "
-                f"(|pnl| > ${ABSURD_PNL_THRESHOLD:,.0f})"
-            )
-
-        # 4) Daily reports may have already aggregated the corrupt P&L — wipe
-        #    daily_reports rows so they regenerate from clean data on next run.
-        from database import DailyReport as _DailyReport
-        dr_scrub = await db.execute(
-            _DailyReport.__table__.update()
-            .where(__or(
-                _DailyReport.total_pnl > ABSURD_PNL_THRESHOLD,
-                _DailyReport.total_pnl < -ABSURD_PNL_THRESHOLD,
-            ))
-            .values(total_pnl=0.0)
-        )
-        if dr_scrub.rowcount:
-            await db.commit()
-            logger.warning(f"Scrubbed {dr_scrub.rowcount} corrupted daily_reports rows")
-
-        # 5) Operator-requested clean slate: reset *every* user's demo balance
-        #    to $10k so all accounts start from the same baseline post-recovery.
-        #    Idempotent — already-$10k users are unchanged.
-        reset_all = await db.execute(
-            _up(User).where(User.demo_balance != 10000.0).values(demo_balance=10000.0)
-        )
-        if reset_all.rowcount:
-            await db.commit()
-            logger.warning(f"Reset {reset_all.rowcount} users to $10,000 demo balance (clean slate)")
-
-        # 6) Scrub absurd trade quantities AND their P&L. The bug stamped
-        #    impossible quantities into Trade.quantity / quantity_value. Some
-        #    rows had massive qty but a small price move so their pnl slipped
-        #    past the earlier $100k pnl filter — leaving "real-looking" pnl
-        #    backed by fake quantity. Threshold by notional (entry × qty) only:
-        #    any single trade > $50k position is impossible for our $10k demo
-        #    seed (60% exposure = $6k position max even with full compounding
-        #    headroom up to ~$80k). Zero qty AND pnl on those rows.
-        ABSURD_QTY_NOTIONAL = 50_000.0
-        cand_q = await db.execute(
-            select(_Trade).where(_Trade.quantity_value > 0.0)
-        )
-        candidates = cand_q.scalars().all()
-        scrub_ids: list[str] = []
-        for tr in candidates:
-            try:
-                ep = float(tr.entry_price) if tr.entry_price else 0.0
-                qv = float(tr.quantity_value or 0.0)
-                if ep > 0 and qv > 0 and (ep * qv) > ABSURD_QTY_NOTIONAL:
-                    scrub_ids.append(tr.id)
-            except (ValueError, TypeError):
-                continue
-        if scrub_ids:
-            CHUNK = 500
-            total = 0
-            for i in range(0, len(scrub_ids), CHUNK):
-                chunk = scrub_ids[i:i+CHUNK]
-                res = await db.execute(
-                    _Trade.__table__.update()
-                    .where(_Trade.id.in_(chunk))
-                    .values(
-                        quantity="0",
-                        quantity_value=0.0,
-                        initial_quantity=0.0,
-                        pnl=0.0,
-                        pnl_pct=0.0,
-                        partial_pnl=0.0,
-                        exit_reason="data_corruption_scrubbed",
-                    )
-                )
-                total += res.rowcount or 0
-            await db.commit()
-            logger.warning(
-                f"Scrubbed {total} corrupted trade rows (qty + pnl) where "
-                f"notional > ${ABSURD_QTY_NOTIONAL:,.0f}"
-            )
-
-        # 7) Final residue cleanup: trades where an earlier migration zeroed
-        #    quantity but left pnl populated. Their notional is now 0 so the
-        #    notional-based scrub above misses them, but the row is logically
-        #    a corruption artifact (quantity is 0 — there's no economic basis
-        #    for any pnl). Zero pnl on every quantity=0 closed trade.
-        residue = await db.execute(
-            _Trade.__table__.update()
-            .where(
-                _Trade.quantity_value == 0.0,
-                _Trade.state == "closed",
-                __or(_Trade.pnl != 0.0, _Trade.pnl_pct != 0.0, _Trade.partial_pnl != 0.0),
-            )
-            .values(pnl=0.0, pnl_pct=0.0, partial_pnl=0.0)
-        )
-        if residue.rowcount:
-            await db.commit()
-            logger.warning(f"Zeroed pnl on {residue.rowcount} qty=0 residue rows")
-
-    # Restore previously active bots
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(User).where(User.bot_active == True))
-        active_users = result.scalars().all()
-        for user in active_users:
-            logger.info(f"Restoring bot for user {user.id}")
-            await start_bot(user.id)
     yield
-    # ── Graceful shutdown: close all open demo positions before cancelling ───
-    # Render gives ~30s on SIGTERM before SIGKILL. Without this, deploy windows
-    # leave demo positions exposed for 5–7 min unmanaged → stop-loss/time-cap
-    # fires on resume against a stale price → preventable losses.
-    try:
-        await asyncio.wait_for(
-            graceful_shutdown_close_all_demo_positions(),
-            timeout=20.0,
-        )
-    except asyncio.TimeoutError:
-        logger.warning("Graceful shutdown timed out at 20s — proceeding to cancel tasks")
-    except Exception as _e:
-        logger.error(f"Graceful shutdown errored: {_e}", exc_info=True)
 
-    # Cancel bot tasks now that positions are flushed
+    # Graceful shutdown — close demo positions before Render kills the process
+    try:
+        await asyncio.wait_for(graceful_shutdown_close_all_demo_positions(), timeout=20.0)
+    except asyncio.TimeoutError:
+        logger.warning("Graceful shutdown timed out at 20s")
+    except Exception as e:
+        logger.error(f"Graceful shutdown error: {e}", exc_info=True)
+
     for task in _bot_tasks.values():
         task.cancel()
 
+
+# ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Nalo.Ai", lifespan=lifespan)
 
@@ -324,14 +86,15 @@ app.include_router(admin_router.router)
 app.include_router(stripe_router.router)
 
 
-# WebSocket
+# ── WebSocket ─────────────────────────────────────────────────────────────────
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
-    await websocket.accept()  # Must accept before closing, otherwise starlette returns 403
+    await websocket.accept()
     async with AsyncSessionLocal() as db:
         user = await get_current_user_ws(token, db)
     if not user:
-        await websocket.close(code=4002)  # 4002 = invalid auth
+        await websocket.close(code=4002)
         return
     await ws_manager.connect(user.id, websocket)
     try:
@@ -340,31 +103,30 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     except WebSocketDisconnect:
         ws_manager.disconnect(user.id, websocket)
     except Exception as e:
-        logger.warning(f"WebSocket error for user {user.id}: {e}")
+        logger.warning(f"WebSocket error for user {user.id[:8]}: {e}")
         ws_manager.disconnect(user.id, websocket)
 
 
-# Health monitoring endpoints
+# ── Health ────────────────────────────────────────────────────────────────────
+
 @app.get("/api/health")
 async def health_check():
-    """Run a full health check across all subsystems."""
-    report = await run_full_health_check()
-    return report
+    return await run_full_health_check()
 
 
 @app.get("/api/health/history")
 async def health_history():
-    """Get recent health check history."""
     return get_health_history()
 
 
 @app.get("/api/health/quick")
 async def health_quick():
-    """Quick liveness check for uptime monitors."""
-    return {"status": "ok", "timestamp": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()}
+    from datetime import datetime, timezone
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
-# Serve React frontend
+# ── React SPA ─────────────────────────────────────────────────────────────────
+
 if os.path.exists("frontend/dist"):
     app.mount("/assets", StaticFiles(directory="frontend/dist/assets"), name="assets")
 
@@ -373,4 +135,4 @@ if os.path.exists("frontend/dist"):
         index = "frontend/dist/index.html"
         if os.path.exists(index):
             return FileResponse(index)
-        return {"error": "Frontend not built. Run: cd frontend && npm run build"}
+        return {"error": "Frontend not built — run: cd frontend && npm run build"}

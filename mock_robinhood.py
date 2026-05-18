@@ -1,76 +1,14 @@
 """
 Mock Robinhood client for demo trading without real API credentials.
-Uses REAL market prices from Coinbase/Kraken for accurate strategy execution,
-but simulates order fills with virtual balance.
+Uses REAL market prices via price_feed (Coinbase → Kraken → Yahoo → CryptoCompare).
+Simulates order fills with virtual balance — no real money, no real API.
 """
 import asyncio
 import logging
 import uuid
-import httpx
+from price_feed import get_price as _fetch_real_price
 
 logger = logging.getLogger(__name__)
-
-# Cache real prices with short TTL to avoid hammering APIs
-_price_cache: dict[str, tuple[float, float]] = {}  # symbol -> (price, timestamp)
-CACHE_TTL = 3.0  # seconds
-
-
-async def _fetch_real_price(symbol: str) -> float:
-    """Fetch real market price from public APIs."""
-    import time
-    now = time.time()
-
-    # Check cache
-    if symbol in _price_cache:
-        cached_price, cached_at = _price_cache[symbol]
-        if now - cached_at < CACHE_TTL:
-            return cached_price
-
-    base = symbol.split("-")[0].upper()
-
-    # 1. Coinbase (primary)
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"https://api.coinbase.com/v2/prices/{symbol}/spot")
-            r.raise_for_status()
-            price = float(r.json()["data"]["amount"])
-            _price_cache[symbol] = (price, now)
-            return price
-    except Exception as e:
-        logger.debug(f"Coinbase price fetch failed for {symbol}: {e}")
-
-    # 2. Kraken (fallback)
-    try:
-        kraken_pair = "XBTUSD" if base == "BTC" else f"{base}USD"
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"https://api.kraken.com/0/public/Ticker?pair={kraken_pair}")
-            r.raise_for_status()
-            result = r.json().get("result", {})
-            ticker = next(iter(result.values()), None)
-            if ticker:
-                price = float(ticker["c"][0])
-                _price_cache[symbol] = (price, now)
-                return price
-    except Exception as e:
-        logger.debug(f"Kraken price fetch failed for {symbol}: {e}")
-
-    # 3. CryptoCompare (last resort)
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"https://min-api.cryptocompare.com/data/price?fsym={base}&tsyms=USD")
-            r.raise_for_status()
-            price = float(r.json()["USD"])
-            _price_cache[symbol] = (price, now)
-            return price
-    except Exception as e:
-        logger.warning(f"All 3 price sources failed for {symbol} (last: CryptoCompare {e})")
-
-    # If all fail, return cached price if available (even if stale)
-    if symbol in _price_cache:
-        return _price_cache[symbol][0]
-
-    logger.error(f"All price sources failed for {symbol}, no cached price available")
-    return 0.0
 
 
 class MockRobinhoodClient:

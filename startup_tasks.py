@@ -1,0 +1,237 @@
+"""
+startup_tasks.py — All one-time startup operations run inside FastAPI lifespan.
+
+Extracted from main.py to keep the app entry-point clean and readable.
+Runs in order on every deploy:
+
+  1. apply_profit_params()   — scalp-mode defaults for uncalibrated users
+  2. apply_pro_boost()       — aggressive sizing for premium users
+  3. recover_corrupt_data()  — detect & fix data corruption (idempotent)
+  4. restore_active_bots()   — restart bots that were running before shutdown
+"""
+
+import logging
+from sqlalchemy import select, update, or_
+from database import AsyncSessionLocal, User, Trade, RiskState, DailyReport
+
+logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Scalp-mode profit parameters
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Only applied to users with calibration_count == 0 (never AI-tuned).
+# Preserves hard-won calibrated parameters across deploys.
+#
+# Target: $200–300/day on a $10k account
+#   SL 0.5%, TP 2.0% → 4:1 R/R
+#   Z-revert fires when unrealised ≥ $15 → avg $15-35 win
+#   60% exposure on $10k = $6k deployed → meaningful position size
+SCALP_PARAMS = dict(
+    entry_z=1.1,
+    stop_loss_pct=0.005,
+    take_profit_pct=0.020,
+    trail_stop_pct=0.005,
+    use_rsi_filter=True,
+    use_ema_filter=False,
+    use_adx_filter=True,
+    use_bbands_filter=True,
+    use_macd_filter=False,
+    max_drawdown_pct=8.0,
+    max_stops_before_pause=5,
+    cooldown_ticks=2,
+    risk_per_trade_pct=2.5,
+    max_exposure_pct=60.0,
+    position_size_mode="dynamic",
+)
+
+
+async def apply_profit_params() -> int:
+    """Apply scalp-mode defaults to uncalibrated users. Returns rows affected."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            update(User)
+            .where(User.calibration_count == 0)
+            .values(**SCALP_PARAMS)
+        )
+        await db.commit()
+    n = result.rowcount
+    logger.info(
+        f"Startup: SCALP MODE → {n} uncalibrated users | "
+        "SL=0.5% TP=2% trail=0.5% z=1.1 risk=2.5% exposure=60%"
+    )
+    return n
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. PRO BOOST — aggressive sizing for premium users
+# ─────────────────────────────────────────────────────────────────────────────
+
+# PRO users have proven 65-69% win rate. Bump risk/exposure for larger P&L.
+# Math: 65% win × 30 trades/day × $2,500 notional × 1% net edge ≈ $487/day
+PRO_BOOST = dict(
+    risk_per_trade_pct=3.5,
+    max_exposure_pct=70.0,
+    stop_loss_pct=0.005,
+    take_profit_pct=0.015,
+    trail_stop_pct=0.004,
+    cooldown_ticks=1,
+)
+
+
+async def apply_pro_boost() -> int:
+    """Apply PRO sizing to all premium users. Returns rows affected."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            update(User).where(User.is_premium == True).values(**PRO_BOOST)
+        )
+        await db.commit()
+    n = result.rowcount
+    logger.info(
+        f"Startup: PRO BOOST → {n} premium users | "
+        "risk=3.5% exposure=70% TP=1.5% trail=0.4% cooldown=1"
+    )
+    return n
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. Data corruption recovery (idempotent)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Previous mock-client short bug credited free proceeds on every sell-to-open,
+# compounding into quintillion-dollar balances and absurd quantities.
+
+_CORRUPT_BALANCE   = 1_000_000.0   # $1M+ → impossible on a $10k demo seed
+_CORRUPT_QTY       = 10_000.0      # >10k units → impossible
+_ABSURD_PNL        = 100_000.0     # |P&L| > $100k → fake
+_ABSURD_NOTIONAL   = 50_000.0      # entry × qty > $50k → impossible (60% of $10k max)
+
+
+async def recover_corrupt_data() -> None:
+    """Detect and fix data corruption. Fully idempotent — safe to run every deploy."""
+    async with AsyncSessionLocal() as db:
+
+        # 1 — Find users with corrupt balance or absurd open-trade quantities
+        corrupt_users: list[User] = []
+
+        bal_q = await db.execute(select(User).where(User.demo_balance > _CORRUPT_BALANCE))
+        corrupt_users.extend(bal_q.scalars().all())
+
+        bad_uid_q = await db.execute(
+            select(Trade.user_id)
+            .where(Trade.state == "open", Trade.is_demo == True, Trade.quantity_value > _CORRUPT_QTY)
+            .distinct()
+        )
+        bad_uids = {r[0] for r in bad_uid_q.all()}
+        if bad_uids:
+            existing = {u.id for u in corrupt_users}
+            extra_q = await db.execute(select(User).where(User.id.in_(bad_uids - existing)))
+            corrupt_users.extend(extra_q.scalars().all())
+
+        for cu in corrupt_users:
+            await db.execute(
+                Trade.__table__.update()
+                .where(Trade.user_id == cu.id, Trade.state == "open")
+                .values(state="closed", exit_reason="corruption_recovery", pnl=0.0, pnl_pct=0.0)
+            )
+            await db.execute(
+                update(User).where(User.id == cu.id)
+                .values(demo_balance=10000.0, bot_active=False)
+            )
+            await db.execute(RiskState.__table__.delete().where(RiskState.user_id == cu.id))
+            logger.warning(f"CORRUPTION RECOVERY: user {cu.id[:8]} reset (was ${cu.demo_balance:,.0f})")
+
+        if corrupt_users:
+            await db.commit()
+
+        # 2 — Zero absurd P&L rows
+        await db.execute(
+            Trade.__table__.update()
+            .where(or_(Trade.pnl > _ABSURD_PNL, Trade.pnl < -_ABSURD_PNL))
+            .values(pnl=0.0, pnl_pct=0.0, partial_pnl=0.0)
+        )
+
+        # 3 — Zero absurd-notional trade quantities
+        cands = (await db.execute(select(Trade).where(Trade.quantity_value > 0.0))).scalars().all()
+        scrub_ids = [
+            t.id for t in cands
+            if (ep := float(t.entry_price or 0)) > 0
+            and (float(t.quantity_value or 0) * ep) > _ABSURD_NOTIONAL
+        ]
+        if scrub_ids:
+            CHUNK = 500
+            for i in range(0, len(scrub_ids), CHUNK):
+                await db.execute(
+                    Trade.__table__.update()
+                    .where(Trade.id.in_(scrub_ids[i:i + CHUNK]))
+                    .values(
+                        quantity="0", quantity_value=0.0, initial_quantity=0.0,
+                        pnl=0.0, pnl_pct=0.0, partial_pnl=0.0,
+                        exit_reason="data_corruption_scrubbed",
+                    )
+                )
+
+        # 4 — Residue: qty=0 closed trades with leftover P&L
+        await db.execute(
+            Trade.__table__.update()
+            .where(
+                Trade.quantity_value == 0.0,
+                Trade.state == "closed",
+                or_(Trade.pnl != 0.0, Trade.pnl_pct != 0.0, Trade.partial_pnl != 0.0),
+            )
+            .values(pnl=0.0, pnl_pct=0.0, partial_pnl=0.0)
+        )
+
+        # 5 — Scrub corrupt daily_reports aggregates
+        await db.execute(
+            DailyReport.__table__.update()
+            .where(or_(DailyReport.total_pnl > _ABSURD_PNL, DailyReport.total_pnl < -_ABSURD_PNL))
+            .values(total_pnl=0.0)
+        )
+
+        # 6 — Ensure all demo balances are reasonable ($10k clean slate)
+        reset = await db.execute(
+            update(User).where(User.demo_balance != 10000.0).values(demo_balance=10000.0)
+        )
+
+        await db.commit()
+
+    n_corrupt = len(corrupt_users)
+    n_scrub   = len(scrub_ids)
+    n_reset   = getattr(reset, "rowcount", 0)
+    logger.info(
+        f"Startup: corruption recovery done — "
+        f"{n_corrupt} users reset, {n_scrub} trades scrubbed, {n_reset} balances normalised"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Restore previously active bots
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def restore_active_bots() -> int:
+    """Restart bots that were running before the last shutdown. Returns count."""
+    from bot_engine import start_bot
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(User).where(User.bot_active == True))
+        users = result.scalars().all()
+
+    for user in users:
+        logger.info(f"Restoring bot for user {user.id[:8]}")
+        await start_bot(user.id)
+
+    logger.info(f"Startup: restored {len(users)} active bot(s)")
+    return len(users)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Master runner — call this once from main.py lifespan
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def run_all() -> None:
+    """Run all startup tasks in order."""
+    await apply_profit_params()
+    await apply_pro_boost()
+    await recover_corrupt_data()
+    await restore_active_bots()
