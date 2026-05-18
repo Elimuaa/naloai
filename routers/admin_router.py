@@ -5,7 +5,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy import select, func, update, Float
-from database import get_db, User, Trade, AsyncSession
+from database import get_db, User, Trade, RiskState, AsyncSession
 from auth import get_current_user
 from datetime import datetime, timezone, timedelta
 
@@ -494,3 +494,59 @@ async def admin_reset_user(
     await start_bot(user_id)
 
     return {"user_id": user_id, "message": "User reset", "demo_balance": 10000.0}
+
+
+# ── Quick-action endpoints (basic-auth, no JWT needed) ──────────────────────
+
+@router.get("/risk/status")
+async def admin_risk_status(
+    credentials: HTTPBasicCredentials = Depends(verify_admin_basic),
+    db: AsyncSession = Depends(get_db),
+):
+    """Show risk-manager pause state for all users (basic auth)."""
+    from sqlalchemy import select as _sel
+    rows = (await db.execute(_sel(RiskState))).scalars().all()
+    from bot_engine import _risk_managers
+    results = []
+    for r in rows:
+        mem_rm = _risk_managers.get(f"{r.user_id}:robinhood") or _risk_managers.get(f"{r.user_id}:capital")
+        results.append({
+            "user_id":      r.user_id[:12],
+            "broker":       getattr(r, "broker", "?"),
+            "db_paused":    r.is_paused,
+            "db_reason":    r.pause_reason,
+            "mem_paused":   mem_rm.is_paused if mem_rm else None,
+            "daily_pnl":    round(r.daily_pnl or 0, 2),
+            "updated_at":   r.updated_at.isoformat() if r.updated_at else None,
+        })
+    return {"risk_states": results, "count": len(results)}
+
+
+@router.post("/risk/force-resume-all")
+async def admin_force_resume_all(
+    credentials: HTTPBasicCredentials = Depends(verify_admin_basic),
+    db: AsyncSession = Depends(get_db),
+):
+    """Force-clear ALL risk-manager pauses (DB + in-memory). Basic auth."""
+    from sqlalchemy import update as _upd
+    from bot_engine import _risk_managers
+
+    # 1 — DB
+    res = await db.execute(
+        _upd(RiskState).where(RiskState.is_paused == True)
+        .values(is_paused=False, pause_reason=None, cooldown_remaining=0)
+    )
+    await db.commit()
+    db_cleared = res.rowcount
+
+    # 2 — In-memory
+    mem_cleared = 0
+    for rm in _risk_managers.values():
+        if rm.is_paused:
+            rm.is_paused = False
+            rm.pause_reason = ""
+            rm.cooldown_remaining = 0
+            mem_cleared += 1
+
+    logger.warning(f"ADMIN force-resume-all: {db_cleared} DB rows, {mem_cleared} in-memory RMs cleared")
+    return {"db_cleared": db_cleared, "mem_cleared": mem_cleared, "status": "ok"}
