@@ -196,6 +196,35 @@ NO_NEW_ENTRY_SYMBOLS: set[str] = {"ETH-USD"}
 CAPITAL_SYMBOLS: set[str] = {"GOLD", "US100"}
 ROBINHOOD_SYMBOLS: set[str] = {"BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD"}
 
+# ── Per-instrument strategy overrides ────────────────────────────────────────
+# GOLD and US100 have fundamentally different volatility profiles from crypto.
+# These are applied inside _bot_loop, overriding the user's calibrated DB params
+# for those symbols only. Crypto loops remain fully calibrator-controlled.
+#
+# GOLD (mean-reverting commodity):
+#   - Daily ATR ~0.3-0.6% — well within a 0.35% SL, no need for wide stops
+#   - Needs higher entry_z to avoid firing on noise in a tight-ranging market
+#   - TP of 2.0% almost never hits in a single session → 0.9% is realistic (2.6× SL)
+#
+# US100 (trending momentum index):
+#   - Daily ATR ~0.8-1.8% — a 0.5% SL gets clipped by normal intraday noise
+#   - Trends strongly: enter at z=1.25 to catch the move early
+#   - On trend days can run 1-2%+ — wider TP captures full move (2.8× SL)
+INSTRUMENT_OVERRIDES: dict[str, dict] = {
+    "GOLD": dict(
+        entry_z=1.7,            # Wait for real extremes on this range-bound instrument
+        stop_loss_pct=0.0035,   # 0.35% SL — fits GOLD's 0.3-0.6% ATR
+        take_profit_pct=0.009,  # 0.9% TP → 2.6× SL R/R, realistic for GOLD
+        trail_stop_pct=0.0025,  # Tight trail — GOLD reversals are gradual
+    ),
+    "US100": dict(
+        entry_z=1.25,           # Trend-following — enter early to capture the move
+        stop_loss_pct=0.009,    # 0.9% SL — US100 intraday noise can exceed 0.5%
+        take_profit_pct=0.025,  # 2.5% TP → 2.8× SL, captures strong trend days
+        trail_stop_pct=0.006,   # Wide trail — don't get shaken out of a real trend
+    ),
+}
+
 
 def _broker_for_symbol(symbol: str) -> str:
     """Return which broker owns this symbol."""
@@ -1115,16 +1144,34 @@ async def _bot_loop(user_id: str, symbol: str):
             trail_stop_pct = user.trail_stop_pct
             tolerance_pct = 0.005 if is_demo else 0.01
 
+            # ── Apply per-instrument overrides (GOLD / US100) ────────────────
+            # GOLD and US100 need different SL/TP/entry_z than crypto — see
+            # INSTRUMENT_OVERRIDES at the top of this module for rationale.
+            # Crypto loops are unaffected; their calibrated DB params apply as-is.
+            if symbol in INSTRUMENT_OVERRIDES:
+                _ovr = INSTRUMENT_OVERRIDES[symbol]
+                stop_loss_pct   = _ovr.get("stop_loss_pct",   stop_loss_pct)
+                take_profit_pct = _ovr.get("take_profit_pct", take_profit_pct)
+                trail_stop_pct  = _ovr.get("trail_stop_pct",  trail_stop_pct)
+                _base_entry_z   = _ovr.get("entry_z",         user.entry_z)
+                logger.debug(
+                    f"Instrument override active for {symbol}: "
+                    f"entry_z={_base_entry_z} SL={stop_loss_pct:.4f} "
+                    f"TP={take_profit_pct:.4f} trail={trail_stop_pct:.4f}"
+                )
+            else:
+                _base_entry_z = user.entry_z
+
             # ── Golden hour scaling (data-driven from 14-month BTC audit) ──
             # Best UTC hours by avg P/L: 8($80), 20($76), 15($55), 19($55), 7($36)
             # During these hours: lower entry threshold + allow up to 25% larger position
             _now_hour = datetime.now(timezone.utc).hour
             GOLDEN_HOURS = {7, 8, 15, 19, 20}
             if _now_hour in GOLDEN_HOURS:
-                entry_z_thresh = max(0.9, user.entry_z * 0.80)  # 20% lower threshold
+                entry_z_thresh = max(0.9, _base_entry_z * 0.80)  # 20% lower threshold
                 _golden_boost = 1.25   # 25% larger position
             else:
-                entry_z_thresh = user.entry_z
+                entry_z_thresh = _base_entry_z
                 _golden_boost = 1.0
 
             current_price = await client.get_current_price(symbol)
