@@ -250,15 +250,22 @@ async def restore_active_bots() -> int:
     """Restart bots that were running before the last shutdown. Returns count."""
     from bot_engine import start_bot
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(User).where(User.bot_active == True))
+        result = await db.execute(select(User))
         users = result.scalars().all()
 
+    count = 0
     for user in users:
-        logger.info(f"Restoring bot for user {user.id[:8]}")
-        await start_bot(user.id)
+        if getattr(user, 'bot_active', False):
+            logger.info(f"Startup: restoring Robinhood bot for user {user.id[:8]}")
+            await start_bot(user.id, broker='robinhood')
+            count += 1
+        if getattr(user, 'bot_active_capital', False):
+            logger.info(f"Startup: restoring Capital.com bot for user {user.id[:8]}")
+            await start_bot(user.id, broker='capital')
+            count += 1
 
-    logger.info(f"Startup: restored {len(users)} active bot(s)")
-    return len(users)
+    logger.info(f"Startup: restored {count} active bot loop(s)")
+    return count
 
 
 # ─────────────────────────────────────────────────────────────────────────────
