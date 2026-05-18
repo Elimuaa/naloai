@@ -190,25 +190,61 @@ async def recover_corrupt_data() -> None:
             .values(total_pnl=0.0)
         )
 
-        # 6 — Ensure all demo balances are reasonable ($10k clean slate)
-        reset = await db.execute(
-            update(User).where(User.demo_balance != 10000.0).values(demo_balance=10000.0)
-        )
+        # NOTE: Step 6 (reset ALL balances to $10k) was a ONE-TIME recovery op.
+        # It must NOT run on every deploy — it wipes real trading gains.
+        # Removed: update(User).where(User.demo_balance != 10000.0)...
 
         await db.commit()
 
     n_corrupt = len(corrupt_users)
     n_scrub   = len(scrub_ids)
-    n_reset   = getattr(reset, "rowcount", 0)
     logger.info(
         f"Startup: corruption recovery done — "
-        f"{n_corrupt} users reset, {n_scrub} trades scrubbed, {n_reset} balances normalised"
+        f"{n_corrupt} users reset, {n_scrub} trades scrubbed"
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Restore previously active bots
 # ─────────────────────────────────────────────────────────────────────────────
+
+async def resume_stuck_risk_managers() -> int:
+    """
+    Auto-resume any risk managers paused for > 8 hours.
+
+    The StopLossGuard pauses trading after N stops in a 4h window.
+    After a deploy/restart the 4h window has long passed but is_paused
+    stays True in the DB — permanently blocking trading. This clears
+    stale pauses on startup so bots can trade again immediately.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    STALE_HOURS = 8
+
+    cleared = 0
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(select(RiskState).where(RiskState.is_paused == True))).scalars().all()
+        for rs in rows:
+            # Check age of pause via updated_at
+            age = datetime.now(timezone.utc) - rs.updated_at.replace(tzinfo=timezone.utc)
+            if age < timedelta(hours=STALE_HOURS):
+                logger.info(f"Startup: respecting recent pause for {rs.user_id[:12]} (age {age})")
+                continue
+
+            await db.execute(
+                update(RiskState)
+                .where(RiskState.user_id == rs.user_id)
+                .values(is_paused=False, pause_reason=None, cooldown_remaining=0)
+            )
+            cleared += 1
+            logger.info(f"Startup: cleared stale pause for {rs.user_id[:12]} (paused {age} ago)")
+
+        if cleared:
+            await db.commit()
+
+    logger.info(f"Startup: auto-resumed {cleared} stale risk pause(s)")
+    return cleared
+
 
 async def restore_active_bots() -> int:
     """Restart bots that were running before the last shutdown. Returns count."""
@@ -234,4 +270,5 @@ async def run_all() -> None:
     await apply_profit_params()
     await apply_pro_boost()
     await recover_corrupt_data()
+    await resume_stuck_risk_managers()   # clear stale pauses before bots start
     await restore_active_bots()
