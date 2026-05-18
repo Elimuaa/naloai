@@ -62,6 +62,7 @@ interface Trade {
   state: string
   is_demo: boolean
   exit_reason: string | null
+  is_system_close?: boolean
   opened_at: string | null
   closed_at: string | null
   indicators_snapshot?: string
@@ -1254,6 +1255,7 @@ export function Dashboard() {
                 <div className="flex gap-2 ml-auto text-xs">
                   <span className="px-2 py-1 rounded-lg bg-elevated text-muted">
                     {stats.total} trades · {stats.win_rate}% win
+                    {(stats as any).system_closes > 0 && <span className="ml-1 opacity-50">+{(stats as any).system_closes} restarts</span>}
                   </span>
                   <span className={`px-2 py-1 rounded-lg font-mono font-semibold ${(stats.total_pnl ?? 0) >= 0 ? 'bg-profit/10 text-profit' : 'bg-loss/10 text-loss'}`}>
                     {(stats.total_pnl ?? 0) >= 0 ? '+' : ''}${(stats.total_pnl ?? 0).toFixed(2)}
@@ -1273,9 +1275,11 @@ export function Dashboard() {
                 <div key={trade.id}>
                   <button
                     className={`w-full text-left p-4 rounded-xl border transition-colors ${
-                      expandedTrade === trade.id ? 'border-accent/30 bg-elevated' : 'border-border bg-card hover:border-border/80 hover:bg-elevated/50'
+                      trade.is_system_close
+                        ? 'opacity-40 border-border bg-card cursor-default'
+                        : expandedTrade === trade.id ? 'border-accent/30 bg-elevated' : 'border-border bg-card hover:border-border/80 hover:bg-elevated/50'
                     }`}
-                    onClick={() => setExpandedTrade(expandedTrade === trade.id ? null : trade.id)}
+                    onClick={() => !trade.is_system_close && setExpandedTrade(expandedTrade === trade.id ? null : trade.id)}
                   >
                     <div className="flex items-center gap-3">
                       {/* Side badge */}
@@ -1294,23 +1298,26 @@ export function Dashboard() {
                             : <span className="text-xs px-1.5 py-0.5 rounded bg-profit/10 text-profit font-medium">LIVE</span>
                           }
                           {trade.state === 'open' && <span className="text-xs px-1.5 py-0.5 rounded bg-accent/10 text-accent font-medium">OPEN</span>}
-                          {trade.ai?.grade && trade.ai.grade !== 'N/A' && <GradeBadge grade={trade.ai.grade} />}
+                          {trade.is_system_close && <span className="text-xs px-1.5 py-0.5 rounded bg-muted/10 text-muted font-medium">Server Restart</span>}
+                          {!trade.is_system_close && trade.ai?.grade && trade.ai.grade !== 'N/A' && <GradeBadge grade={trade.ai.grade} />}
                         </div>
                         <p className="text-xs text-muted mt-0.5">
                           {trade.opened_at ? new Date(trade.opened_at).toLocaleString() : '—'}
-                          {trade.exit_reason && ` · ${trade.exit_reason}`}
+                          {!trade.is_system_close && trade.exit_reason && ` · ${trade.exit_reason}`}
                         </p>
                       </div>
 
                       <div className="text-right flex-shrink-0">
-                        {trade.pnl !== null ? (
+                        {trade.is_system_close ? (
+                          <p className="text-xs text-muted italic">closed on restart</p>
+                        ) : trade.pnl !== null ? (
                           <p className={`font-mono font-bold text-sm ${trade.pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
                             {trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}
                           </p>
                         ) : (
                           <p className="text-muted text-sm">—</p>
                         )}
-                        {trade.entry_price && (
+                        {!trade.is_system_close && trade.entry_price && (
                           <p className="text-xs text-muted font-mono">${parseFloat(trade.entry_price).toLocaleString('en-US', { minimumFractionDigits: 2 })}</p>
                         )}
                       </div>
