@@ -173,6 +173,7 @@ async def me(current_user: User = Depends(get_current_user)):
         "is_admin": _is_admin(current_user.email),
         "is_premium": getattr(current_user, "is_premium", False),
         "calibration_count": getattr(current_user, "calibration_count", 0),
+        "force_demo_robinhood": getattr(current_user, "force_demo_robinhood", False),
         # Signal parameters — critical for verifying startup_tasks applied correctly
         "entry_z": getattr(current_user, "entry_z", None),
         "stop_loss_pct": getattr(current_user, "stop_loss_pct", None),

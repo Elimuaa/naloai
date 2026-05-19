@@ -848,3 +848,50 @@ async def get_strategy_memory(current_user: User = Depends(get_current_user)):
             "worst_recipes": global_recipes["worst"],
         }
     return payload
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Force-demo override for Robinhood (pipeline verification)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ForceDemoPayload(BaseModel):
+    enabled: bool
+
+
+@router.post("/force-demo-robinhood")
+async def set_force_demo_robinhood(
+    payload: ForceDemoPayload,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle force_demo_robinhood for the current user. Restarts Robinhood
+    loops so the new mode takes effect immediately. Capital.com is untouched."""
+    from bot_engine import start_bot, stop_bot, _bot_tasks
+
+    await db.execute(
+        update(User).where(User.id == current_user.id)
+        .values(force_demo_robinhood=payload.enabled)
+    )
+    await db.commit()
+
+    # Restart only Robinhood loops so the new effective_force_demo is picked up.
+    rh_symbols = {"BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD"}
+    rh_running = any(
+        k.startswith(f"{current_user.id}:") and not t.done()
+        and k.split(":")[-1] in rh_symbols
+        for k, t in _bot_tasks.items()
+    )
+    if rh_running:
+        await stop_bot(current_user.id, broker='robinhood')
+        await start_bot(current_user.id, broker='robinhood')
+
+    return {
+        "force_demo_robinhood": payload.enabled,
+        "robinhood_restarted": rh_running,
+        "message": (
+            "Robinhood now running in DEMO mode — synthetic signals will inject ~2/min. "
+            "Trades will fire within minutes."
+            if payload.enabled else
+            "Robinhood back to LIVE mode — real broker API in use."
+        ),
+    }

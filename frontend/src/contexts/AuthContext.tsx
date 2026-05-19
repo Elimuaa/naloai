@@ -7,6 +7,7 @@ interface User {
   has_api_keys: boolean
   bot_active: boolean
   is_admin?: boolean
+  force_demo_robinhood?: boolean
 }
 
 interface AuthCtx {

@@ -56,6 +56,12 @@ class User(Base):
     capital_demo_balance: Mapped[float] = mapped_column(Float, default=10000.0)
     bot_active_capital: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Force demo override — runs Robinhood loops in demo mode even when live
+    # creds are present. Used to verify the trading pipeline end-to-end with
+    # synthetic signal injection (~2/min) without risking real Robinhood cash.
+    # Capital.com already uses the demo Capital.com API so doesn't need this.
+    force_demo_robinhood: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # Advanced strategy settings
     use_rsi_filter: Mapped[bool] = mapped_column(Boolean, default=True)
     use_ema_filter: Mapped[bool] = mapped_column(Boolean, default=False)  # profit-optimized (was True)
@@ -294,6 +300,7 @@ async def init_db():
             # Multi-broker independent bot columns
             "ALTER TABLE users ADD COLUMN capital_demo_balance REAL DEFAULT 10000.0",
             "ALTER TABLE users ADD COLUMN bot_active_capital INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN force_demo_robinhood INTEGER DEFAULT 0",
             # Strategy memory composite index — speeds up bucket lookups
             ("CREATE INDEX IF NOT EXISTS ix_strategy_memory_bucket "
              "ON strategy_memory (symbol, side, hour_utc, regime, signal_strength_bucket, z_bucket, user_id)"),

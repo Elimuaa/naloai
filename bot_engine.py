@@ -1113,11 +1113,24 @@ async def _bot_loop(user_id: str, symbol: str):
                 has_live_creds = bool(user.tradovate_username and user.tradovate_password)
             else:
                 has_live_creds = bool(user.rh_api_key and user.ed25519_private_key)
-            is_demo = state.force_demo or not has_live_creds
+
+            # Per-broker demo override:
+            # `force_demo_robinhood` forces Robinhood symbol loops into demo
+            # mode (enabling synthetic signal injection) even when live creds
+            # exist — used for pipeline verification without risking real cash.
+            # Capital.com already uses Capital's demo endpoint, so this flag
+            # only applies to Robinhood-owned symbols.
+            sym_broker_for_demo = _broker_for_symbol(symbol)
+            user_force_demo = (
+                sym_broker_for_demo == 'robinhood'
+                and getattr(user, 'force_demo_robinhood', False)
+            )
+            effective_force_demo = state.force_demo or user_force_demo
+            is_demo = effective_force_demo or not has_live_creds
             state.demo_mode = is_demo
             POLL_INTERVAL = 6 if is_demo else 15  # 15s live for faster reaction
 
-            client = _get_client(user, force_demo=state.force_demo)
+            client = _get_client(user, force_demo=effective_force_demo)
             if not client:
                 await asyncio.sleep(30)
                 continue

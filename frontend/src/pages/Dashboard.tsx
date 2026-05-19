@@ -1070,6 +1070,48 @@ export function Dashboard() {
               </div>
             )}
 
+            {/* ── Force Demo Robinhood toggle ── */}
+            {/* Lets the user verify the trading pipeline end-to-end with synthetic
+                signals (~2/min) without risking real Robinhood cash. Capital.com
+                is unaffected — it already uses the demo Capital.com API. */}
+            {settings?.has_api_keys && (
+              <div className={`flex items-center justify-between gap-3 px-4 py-3 rounded-xl border ${
+                user?.force_demo_robinhood
+                  ? 'border-yellow-500/40 bg-yellow-500/10'
+                  : 'border-border bg-card'
+              }`}>
+                <div>
+                  <p className="text-sm font-semibold">
+                    {user?.force_demo_robinhood ? '🧪 Robinhood: DEMO mode (forced)' : '💰 Robinhood: LIVE mode'}
+                  </p>
+                  <p className="text-xs text-muted mt-0.5">
+                    {user?.force_demo_robinhood
+                      ? 'Synthetic signals firing ~2/min — verifying pipeline.'
+                      : 'Real Robinhood account in use.'}
+                  </p>
+                </div>
+                <button
+                  onClick={async () => {
+                    const next = !user?.force_demo_robinhood
+                    try {
+                      const r = await api.post('/api/bot/force-demo-robinhood', { enabled: next })
+                      setToast({ msg: r.data.message, ok: true })
+                      await refreshUser()
+                    } catch (e: any) {
+                      setToast({ msg: e?.response?.data?.detail || 'Failed', ok: false })
+                    }
+                  }}
+                  className={`text-xs px-3 py-1.5 rounded-lg font-semibold transition-colors ${
+                    user?.force_demo_robinhood
+                      ? 'bg-elevated border border-border text-white hover:bg-card'
+                      : 'bg-yellow-500/20 border border-yellow-500/40 text-yellow-300 hover:bg-yellow-500/30'
+                  }`}
+                >
+                  {user?.force_demo_robinhood ? 'Switch to LIVE' : 'Switch to DEMO'}
+                </button>
+              </div>
+            )}
+
             {/* ── Bot Controls ── */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <BotCard
