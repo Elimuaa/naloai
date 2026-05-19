@@ -21,11 +21,22 @@ from sqlalchemy import select, update
 
 logger = logging.getLogger(__name__)
 
-def _get_client(user: User, force_demo: bool = False):
-    """Return broker client based on user's broker_type setting.
-    Routes to Capital.com, Tradovate, or Robinhood. Falls back to matching mock client.
-    Caches the client to preserve internal state (e.g. demo balance)."""
-    broker = (getattr(user, 'broker_type', 'robinhood') or 'robinhood').lower().strip()
+def _get_client(user: User, symbol: str | None = None, force_demo: bool = False):
+    """Return broker client appropriate for the SYMBOL being traded.
+
+    CRITICAL: client selection must be driven by the symbol's broker, NOT by
+    `user.broker_type`. A user can have broker_type='capital' while running a
+    BTC-USD bot loop — that loop must use Robinhood, never Capital.com. The old
+    behaviour caused every Robinhood symbol loop to use a CapitalComClient that
+    then failed every price fetch (BTC isn't a Capital.com instrument).
+
+    Falls back to user.broker_type for backward compat when no symbol is given
+    (e.g. legacy callers in graceful_shutdown).
+    """
+    if symbol is not None:
+        broker = _broker_for_symbol(symbol)
+    else:
+        broker = (getattr(user, 'broker_type', 'robinhood') or 'robinhood').lower().strip()
     mode_key = 'demo' if force_demo else 'live'
     cache_key = f"{user.id}:{broker}:{mode_key}"
 
@@ -485,7 +496,7 @@ async def start_bot(user_id: str, force_demo: bool = False, broker: str = 'robin
         # a short is -qty. Without the sign, restoring a short as +qty and then
         # buying-to-close double-counts proceeds and corrupts the demo balance.
         if state.in_trade and state.current_quantity > 0:
-            client_now = _get_client(user, force_demo=force_demo)
+            client_now = _get_client(user, symbol=sym, force_demo=force_demo)
             if hasattr(client_now, '_holdings'):
                 sign = 1.0 if (state.trade_side or "buy") == "buy" else -1.0
                 current_held = client_now._holdings.get(sym, 0)
@@ -497,7 +508,7 @@ async def start_bot(user_id: str, force_demo: bool = False, broker: str = 'robin
                     f"(total held: {client_now._holdings[sym]:.6f}, side={state.trade_side})"
                 )
         if state.second_slot and state.second_slot.get("quantity", 0) > 0:
-            client_now = _get_client(user, force_demo=force_demo)
+            client_now = _get_client(user, symbol=sym, force_demo=force_demo)
             if hasattr(client_now, '_holdings'):
                 s2 = state.second_slot
                 s2_qty = s2.get("quantity", 0)
@@ -554,7 +565,7 @@ async def graceful_shutdown_close_all_demo_positions():
                 )).scalar_one_or_none()
             if user is None:
                 continue
-            client = _get_client(user, force_demo=True)
+            client = _get_client(user, symbol=symbol, force_demo=True)
 
             # Best-effort current price for the close fill
             try:
@@ -1130,7 +1141,7 @@ async def _bot_loop(user_id: str, symbol: str):
             state.demo_mode = is_demo
             POLL_INTERVAL = 6 if is_demo else 15  # 15s live for faster reaction
 
-            client = _get_client(user, force_demo=effective_force_demo)
+            client = _get_client(user, symbol=symbol, force_demo=effective_force_demo)
             if not client:
                 await asyncio.sleep(30)
                 continue
@@ -1193,11 +1204,13 @@ async def _bot_loop(user_id: str, symbol: str):
                 await ws_manager.send_to_user(user_id, {
                     "type": "status_update", "key_invalid": False,
                 })
-            if current_price <= 0 and not is_demo:
+            if current_price <= 0:
+                # Always try the unified price_feed fallback (covers crypto + GOLD + US100)
+                # regardless of demo/live mode — bot is useless if it can't get a price.
                 try:
-                    from routers.market_router import _fetch_price
-                    fallback = await _fetch_price(symbol)
-                    if fallback:
+                    from price_feed import get_price as _pf_get_price
+                    fallback = await _pf_get_price(symbol)
+                    if fallback and fallback > 0:
                         current_price = fallback
                 except Exception as _e:
                     logger.warning(f"Price fetch fallback failed for {user_id}/{symbol}: {_e}")
