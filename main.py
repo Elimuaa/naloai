@@ -33,6 +33,7 @@ from health_monitor import run_full_health_check, get_health_history
 from routers import (
     auth_router, bot_router, trades_router,
     reports_router, market_router, admin_router, stripe_router,
+    debug_router,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -84,6 +85,7 @@ app.include_router(reports_router.router)
 app.include_router(market_router.router)
 app.include_router(admin_router.router)
 app.include_router(stripe_router.router)
+app.include_router(debug_router.router)
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
