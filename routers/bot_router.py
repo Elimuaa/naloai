@@ -303,31 +303,49 @@ async def get_settings(current_user: User = Depends(get_current_user)):
 
 @router.get("/balances")
 async def get_all_balances(current_user: User = Depends(get_current_user)):
-    """Return available balance for both brokers."""
+    """Return available balance for both brokers.
+
+    For each broker we determine `is_demo` from whether the user has real
+    live credentials, then prefer the live client (which calls the real broker
+    API via get_portfolio_cash). Falls back to mock client `.balance`, then to
+    the DB demo_balance. Without this fix the dashboard shows demo_balance
+    relabeled as 'Live Balance' — looks like a flat $10k even when bots run.
+    """
     from bot_engine import _client_cache
     result = {}
 
-    # Robinhood balance
-    rh_client = (_client_cache.get(f"{current_user.id}:robinhood:demo")
-                 or _client_cache.get(f"{current_user.id}:robinhood:live"))
-    if rh_client and hasattr(rh_client, 'balance'):
-        result["robinhood"] = {"available": round(rh_client.balance, 2), "is_demo": True}
-    else:
-        result["robinhood"] = {"available": current_user.demo_balance or 10000.0, "is_demo": True}
+    # ── Robinhood ────────────────────────────────────────────────────────────
+    rh_is_live = bool(current_user.rh_api_key and (current_user.ed25519_private_key or current_user.rh_private_key))
+    rh_client = _client_cache.get(f"{current_user.id}:robinhood:{'live' if rh_is_live else 'demo'}")
+    rh_cash = None
+    if rh_client:
+        # Real Robinhood client exposes get_portfolio_cash; mock exposes .balance
+        if hasattr(rh_client, 'get_portfolio_cash'):
+            try:
+                rh_cash = await rh_client.get_portfolio_cash()
+            except Exception as e:
+                logger.warning(f"Robinhood get_portfolio_cash failed for {current_user.id[:8]}: {e}")
+        if rh_cash is None and hasattr(rh_client, 'balance'):
+            rh_cash = round(rh_client.balance, 2)
+    if rh_cash is None:
+        rh_cash = current_user.demo_balance or 10000.0
+    result["robinhood"] = {"available": round(rh_cash, 2), "is_demo": not rh_is_live}
 
-    # Capital.com balance
-    cap_client = (_client_cache.get(f"{current_user.id}:capital:demo")
-                  or _client_cache.get(f"{current_user.id}:capital:live"))
-    if cap_client and hasattr(cap_client, 'get_portfolio_cash'):
-        try:
-            cash = await cap_client.get_portfolio_cash()
-            result["capital"] = {"available": cash, "is_demo": getattr(cap_client, '_demo', True)}
-        except Exception:
-            result["capital"] = {"available": getattr(current_user, 'capital_demo_balance', 10000.0), "is_demo": True}
-    elif cap_client and hasattr(cap_client, 'balance'):
-        result["capital"] = {"available": round(cap_client.balance, 2), "is_demo": True}
-    else:
-        result["capital"] = {"available": getattr(current_user, 'capital_demo_balance', 10000.0), "is_demo": True}
+    # ── Capital.com ──────────────────────────────────────────────────────────
+    cap_is_live = bool(current_user.capital_api_key and current_user.capital_identifier)
+    cap_client = _client_cache.get(f"{current_user.id}:capital:{'live' if cap_is_live else 'demo'}")
+    cap_cash = None
+    if cap_client:
+        if hasattr(cap_client, 'get_portfolio_cash'):
+            try:
+                cap_cash = await cap_client.get_portfolio_cash()
+            except Exception as e:
+                logger.warning(f"Capital.com get_portfolio_cash failed for {current_user.id[:8]}: {e}")
+        if cap_cash is None and hasattr(cap_client, 'balance'):
+            cap_cash = round(cap_client.balance, 2)
+    if cap_cash is None:
+        cap_cash = getattr(current_user, 'capital_demo_balance', 10000.0) or 10000.0
+    result["capital"] = {"available": round(cap_cash, 2), "is_demo": not cap_is_live}
 
     return result
 

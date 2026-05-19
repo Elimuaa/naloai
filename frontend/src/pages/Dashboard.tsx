@@ -451,6 +451,17 @@ export function Dashboard() {
     }).catch(() => {})
   }, [tradeFilter, brokerFilter])
 
+  // Refresh broker balances every 30s so the live broker balance stays current.
+  // Critical in live mode — without this, the dashboard shows a stale snapshot
+  // and a winning trade's cash gain doesn't appear until the next page load.
+  useEffect(() => {
+    const tick = () => {
+      api.get('/api/bot/balances').then(r => setBrokerBalances(r.data)).catch(() => {})
+    }
+    const id = setInterval(tick, 30000)
+    return () => clearInterval(id)
+  }, [])
+
   // Build equity curve from trades, filtered by perfMode
   useEffect(() => {
     if (!trades.length) return
@@ -866,9 +877,18 @@ export function Dashboard() {
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
-  const totalBalance = (liveDemoBalance ?? 10000) + (capitalDemoBalance ?? settings?.capital_demo_balance ?? 10000)
-  const rhBalance = liveDemoBalance ?? settings?.demo_balance ?? 10000
-  const capBalance = capitalDemoBalance ?? settings?.capital_demo_balance ?? 10000
+  // Prefer per-broker /balances response (which fetches real broker cash in live mode).
+  // Fall back to WebSocket-updated demo values, then settings, then 10k default.
+  // Without this fix, live-mode users saw demo_balance relabeled as "Live Balance".
+  const rhBalance = brokerBalances?.robinhood?.available
+    ?? liveDemoBalance
+    ?? settings?.demo_balance
+    ?? 10000
+  const capBalance = brokerBalances?.capital?.available
+    ?? capitalDemoBalance
+    ?? settings?.capital_demo_balance
+    ?? 10000
+  const totalBalance = rhBalance + capBalance
 
   return (
     <div className="min-h-screen bg-dark text-white flex flex-col">
