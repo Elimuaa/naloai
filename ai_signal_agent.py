@@ -43,25 +43,51 @@ def _get_client():
 SYSTEM_PROMPT = """You are Nalo.Ai's signal-decision agent. The trading bot has just identified a candidate entry (z-score crossed and price retested). Your job is to read the full context via your tools and decide whether to take the trade.
 
 You have these tools:
+- get_instrument_profile(symbol): asset class, expected behaviour, ideal conditions, hostile conditions — READ THIS FIRST
 - get_indicators(symbol): RSI, ADX, BBands %B, MACD, EMA, regime, slow-z
 - get_recent_trades(symbol, limit): the last N closed trades for this symbol with side, pnl, exit_reason
 - get_strategy_memory(symbol, side, hour_utc): historical win rate for this exact bucket
 - get_market_context(symbol): current price, current UTC hour, dead-zone status, recent volatility
 
-DECISION CRITERIA — be conservative:
-- Skip if the historical win rate for this bucket is < 40% AND sample size > 10
-- Skip if the regime strongly conflicts with the entry direction (strong uptrend + SELL signal = skip)
-- Skip if RSI is at the wrong extreme for the side (RSI > 75 + BUY = skip)
-- Skip if recent trades on this symbol are 3+ losses in a row
-- ENTER if z-score is strong (>= 1.5) AND no strong conflicting signal
-- ENTER if pattern memory shows >= 55% win rate for this bucket with sample size >= 5
+INSTRUMENT-SPECIFIC GUIDANCE — apply different reasoning per asset class:
 
-Use 2-4 tool calls maximum before deciding. Don't over-research — the bot needs a decision in seconds.
+CRYPTO (BTC-USD, SOL-USD, DOGE-USD, ETH-USD):
+- 24/7 market; mean-reversion strategy works well
+- Be moderately aggressive — z ≥ 1.3 with confluence is enough to enter
+- Watch for unusual ADX > 40 (suggests news/whale event → SKIP, momentum will overwhelm)
+- Volume thin during dead zones (1, 11, 13, 18 UTC) — be extra selective
+- Recent losing streak (3+ in a row) on the same side suggests regime change → SKIP
+- For SELL signals: prefer when RSI > 70 AND BB %B > 0.85 (real exhaustion)
+- For BUY signals: prefer when RSI < 35 AND BB %B < 0.15
+
+GOLD:
+- Mean-reverting commodity, lower volatility than crypto (~0.3-0.6%/day ATR)
+- Be MORE selective — require z ≥ 1.5 AND at least one indicator confirmation
+- Best hours: 8-10 UTC (London open) and 13-15 UTC (NY open) — better fills, more volume
+- Hostile: strong DXY moves, geopolitical news days — skip if regime shows strong trend
+- For BUY signals: weak retest signal at z=1.3 should be SKIPPED on GOLD (too noisy)
+- Sample size matters more than crypto — require ≥ 8 trades in the bucket for memory to influence
+
+US100 (NASDAQ-100):
+- TRENDING index, not mean-reverting — apply reversion logic carefully
+- Strong trend (ADX 25-40) is NORMAL for US100, do NOT reflexively reject like you would on GOLD
+- For BUY signals: STRONGLY prefer when slow-z is also positive (trend continuation > reversion)
+- For SELL signals: only on very strong z (≥ 1.8) AND conflicting indicators (RSI > 75 + BB%B > 0.95)
+- HARD SKIP outside 14:00-19:59 UTC (no liquidity, signals are noise)
+- ETH-USD-style mean-reversion failure mode applies here — if pattern memory shows < 40% on SELL signals, skip almost all SELL setups
+
+GENERAL DECISION CRITERIA (apply ALONGSIDE the above):
+- Skip if historical win rate for this exact bucket is < 40% AND sample size > 10
+- Skip if recent trades on this symbol are 3+ losses in a row
+- ENTER if z-score is strong (>= 1.5) AND no strong conflicting signal (and asset-class checks above pass)
+- ENTER if pattern memory shows >= 55% win rate with sample size >= 5 (and asset-class checks above pass)
+
+CRITICAL: start every decision by calling get_instrument_profile(symbol). The profile tells you which rules above apply. Then 2-3 more tool calls maximum.
 
 Respond with ONLY a JSON object on your final turn:
 {
   "decision": "enter" or "skip",
-  "reason": "one sentence explaining why",
+  "reason": "one sentence explaining why, mentioning the asset class consideration that drove it",
   "confidence": 0.0 to 1.0
 }
 No prose around the JSON. No code blocks. Just the JSON."""
@@ -69,6 +95,15 @@ No prose around the JSON. No code blocks. Just the JSON."""
 
 # ── Tool definitions (the JSON-schema the agent sees) ─────────────────────────
 TOOLS = [
+    {
+        "name": "get_instrument_profile",
+        "description": "Return the instrument's asset-class profile: behaviour, ideal conditions, hostile conditions, suggested entry_z. CALL THIS FIRST — it tells you which decision rules apply.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+    },
     {
         "name": "get_indicators",
         "description": "Return the latest technical indicators for a symbol's bot loop",
@@ -186,10 +221,99 @@ async def _tool_get_market_context(user_id: str, symbol: str) -> dict:
     return ctx
 
 
+# ── Static instrument profiles — pure data, no DB lookup needed ──────────────
+# Hand-authored from the strategy notes in INSTRUMENT_OVERRIDES + the per-asset
+# guidance in the system prompt. Returning structured data (not free text) lets
+# the agent reason cleanly about which rules apply.
+_INSTRUMENT_PROFILES = {
+    # ── Crypto ──
+    "BTC-USD": {
+        "asset_class": "crypto",
+        "behaviour": "mean-reverting, 24/7 trading, occasionally trending on news",
+        "ideal_conditions": "ranging market (ADX 15-25), z >= 1.3 with RSI/BB confluence",
+        "hostile_conditions": "ADX > 40 (news/whale event), dead zones (1,11,13,18 UTC), >3 recent losses",
+        "suggested_entry_z": 1.3,
+        "sl_pct": 0.005, "tp_pct": 0.02,
+        "session_window_utc": "24/7 except dead zones {1,11,13,18}",
+        "notes": "Most-active symbol on the platform. Be selective during low-volume hours.",
+    },
+    "ETH-USD": {
+        "asset_class": "crypto",
+        "behaviour": "mean-reversion premise has FAILED historically (0/28 z-reverts in audit)",
+        "ideal_conditions": "almost none — entries are blocked at the bot level (NO_NEW_ENTRY_SYMBOLS)",
+        "hostile_conditions": "always — z-reversion doesn't fire on this symbol",
+        "suggested_entry_z": 9.99,
+        "sl_pct": 0.005, "tp_pct": 0.02,
+        "session_window_utc": "blocked",
+        "notes": "If you're seeing a candidate for ETH-USD, SKIP. Existing positions still get managed to close.",
+    },
+    "SOL-USD": {
+        "asset_class": "crypto",
+        "behaviour": "mean-reverting, more volatile than BTC, news-sensitive",
+        "ideal_conditions": "ranging market, z >= 1.4, RSI confluence",
+        "hostile_conditions": "ADX > 40, breakout days, low volume hours",
+        "suggested_entry_z": 1.3,
+        "sl_pct": 0.005, "tp_pct": 0.02,
+        "session_window_utc": "24/7 except dead zones {1,11,13,18}",
+        "notes": "Has produced the most wins in recent sessions. Treat like BTC but tighter on confirmation.",
+    },
+    "DOGE-USD": {
+        "asset_class": "crypto",
+        "behaviour": "mean-reverting, EXTREMELY volatile, high ADX days are common",
+        "ideal_conditions": "low ADX (< 25), z >= 1.3, no recent meme-trigger news",
+        "hostile_conditions": "ADX > 30 (DOGE rallies are violent), >2 recent losses",
+        "suggested_entry_z": 1.3,
+        "sl_pct": 0.005, "tp_pct": 0.02,
+        "session_window_utc": "24/7 except dead zones {1,11,13,18}",
+        "notes": "Lowest-priced asset (~$0.10) → position sizes are 70k+ units. Slippage matters more.",
+    },
+    # ── Commodities ──
+    "GOLD": {
+        "asset_class": "commodity",
+        "behaviour": "mean-reverting, low volatility (0.3-0.6%/day ATR), session-sensitive",
+        "ideal_conditions": "z >= 1.5 + RSI/BB confirmation, 8-10 UTC (London) or 13-15 UTC (NY)",
+        "hostile_conditions": "strong DXY move days, geopolitical news, ADX > 25 (rare but bad)",
+        "suggested_entry_z": 1.7,
+        "sl_pct": 0.004, "tp_pct": 0.014,
+        "session_window_utc": "Sun 21 UTC – Fri 21 UTC (no dead zones inside)",
+        "notes": "Best money-maker per trade on the platform when conditions align. Be selective.",
+    },
+    # ── Indices ──
+    "US100": {
+        "asset_class": "index",
+        "behaviour": "TRENDING (not mean-reverting), 0.8-1.8% daily ATR, momentum-driven",
+        "ideal_conditions": "BUY signals with slow-z positive (trend continuation), 14-19 UTC only",
+        "hostile_conditions": "SELL signals during US rallies, Fed days, NFP days, outside 14:00-19:59 UTC",
+        "suggested_entry_z": 1.2,
+        "sl_pct": 0.009, "tp_pct": 0.030,
+        "session_window_utc": "14:00 - 19:59 UTC only (HARD constraint)",
+        "notes": "Mean-reversion logic backfires here. Strongly prefer BUYs in uptrends, treat SELLs with extreme skepticism.",
+    },
+}
+
+
+async def _tool_get_instrument_profile(symbol: str) -> dict:
+    """Return the hand-authored asset-class profile for this symbol."""
+    profile = _INSTRUMENT_PROFILES.get(symbol)
+    if not profile:
+        # Fallback — synthesize a minimal profile from broker mapping
+        from bot_engine import _broker_for_symbol
+        broker = _broker_for_symbol(symbol)
+        return {
+            "asset_class": "unknown",
+            "behaviour": f"no specific profile — falls back to default {broker} strategy",
+            "suggested_entry_z": 1.3,
+            "notes": "No tailored guidance available. Apply general decision criteria from the system prompt.",
+        }
+    return profile
+
+
 async def _dispatch_tool(name: str, tool_input: dict, user_id: str) -> str:
     """Run a single tool and return its JSON-serialised result."""
     try:
-        if name == "get_indicators":
+        if name == "get_instrument_profile":
+            result = await _tool_get_instrument_profile(tool_input["symbol"])
+        elif name == "get_indicators":
             result = await _tool_get_indicators(user_id, tool_input["symbol"])
         elif name == "get_recent_trades":
             result = await _tool_get_recent_trades(
@@ -220,7 +344,7 @@ async def decide_entry(
     side: str,
     z_score: float,
     entry_price: float,
-    max_turns: int = 6,
+    max_turns: int = 8,   # 5 tools + final → allow some headroom
 ) -> dict:
     """Ask the agent whether to take this candidate entry.
 
