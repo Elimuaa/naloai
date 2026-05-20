@@ -16,11 +16,58 @@ The URL secret is intentionally long + random so it can't be guessed.
 Remove this router once Render logs are accessible.
 """
 import logging
+import os
+import subprocess
 from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import select, desc
 from database import AsyncSessionLocal, Trade, User, RiskState
+
+
+# ── Resolve the deployed git commit at module import (cached for the
+# lifetime of the process) so /api/debug/state can prove WHICH code is
+# actually running. Three strategies in order of reliability on Render:
+#   1. RENDER_GIT_COMMIT env var — Render injects this automatically on
+#      every deploy. Most reliable when present.
+#   2. .git/HEAD direct read — works in any plain checkout.
+#   3. `git rev-parse HEAD` subprocess — works if git is installed.
+def _resolve_deployed_commit() -> dict:
+    info = {"sha": None, "short": None, "source": None}
+    sha = os.getenv("RENDER_GIT_COMMIT") or os.getenv("GIT_COMMIT")
+    if sha:
+        info.update(sha=sha.strip(), short=sha.strip()[:7], source="env")
+        return info
+    try:
+        # .git/HEAD points to "ref: refs/heads/main" or directly to a SHA
+        git_dir = Path(__file__).resolve().parent.parent / ".git"
+        head = (git_dir / "HEAD").read_text().strip()
+        if head.startswith("ref:"):
+            ref_path = git_dir / head.split(" ", 1)[1].strip()
+            sha = ref_path.read_text().strip()
+        else:
+            sha = head
+        if sha:
+            info.update(sha=sha, short=sha[:7], source="dot-git")
+            return info
+    except Exception:
+        pass
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=2,
+            cwd=Path(__file__).resolve().parent.parent,
+        ).stdout.strip()
+        if sha:
+            info.update(sha=sha, short=sha[:7], source="subprocess")
+            return info
+    except Exception:
+        pass
+    return info
+
+
+_DEPLOYED_COMMIT = _resolve_deployed_commit()
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +219,7 @@ async def debug_state(key: str = Query(...)):
 
     return {
         "now_utc": datetime.now(timezone.utc).isoformat(),
+        "deployed_commit": _DEPLOYED_COMMIT,
         "bot_loops": bots,
         "risk_managers": risk_mgrs,
         "client_cache": clients,
