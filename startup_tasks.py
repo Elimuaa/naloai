@@ -257,6 +257,56 @@ async def recover_corrupt_data() -> None:
                 f"user(s) wrongly disabled by old corruption_recovery"
             )
 
+    # ── One-shot recovery: heal demo balances drained by the OLD broken
+    # corruption_recovery + mock-client phantom-position bug.
+    #
+    # Old corruption_recovery closed trades in the DB but never closed the
+    # matching mock-client positions. Cash that the mock had deducted on
+    # position-open was never returned, draining demo_balance silently.
+    # One affected user's MockRobinhoodClient.balance was at \$18.80 with
+    # only -\$4.40 of legitimate trade P&L — \$9,981 of unexplained drain.
+    #
+    # Heuristic: any premium demo user with demo_balance < \$5000 is almost
+    # certainly a drain victim (a normal trading session can lose at most a
+    # few hundred dollars). Reset to \$10k. We also clear the mock client
+    # cache so the next bot tick rebuilds a fresh client with the right
+    # balance instead of reusing the drained in-memory one.
+    async with AsyncSessionLocal() as db3:
+        from sqlalchemy import or_ as _or
+        drained_q = await db3.execute(
+            select(User).where(
+                User.is_premium == True,
+                _or(User.demo_balance < 5000.0, User.capital_demo_balance < 5000.0),
+            )
+        )
+        drained = drained_q.scalars().all()
+        if drained:
+            for du in drained:
+                old_rh = du.demo_balance
+                old_cap = du.capital_demo_balance
+                await db3.execute(
+                    update(User).where(User.id == du.id)
+                    .values(demo_balance=10000.0, capital_demo_balance=10000.0)
+                )
+                logger.warning(
+                    f"Startup: reset drained demo balances for {du.id[:8]} "
+                    f"(was RH=${old_rh:.2f} CAP=${old_cap:.2f} → both $10,000)"
+                )
+            await db3.commit()
+
+            # Clear the in-process mock client cache so the next bot tick
+            # rebuilds with the freshly-reset balance.
+            try:
+                from bot_engine import _client_cache
+                victim_ids = {du.id for du in drained}
+                for k in list(_client_cache.keys()):
+                    uid = k.split(":")[0]
+                    if uid in victim_ids:
+                        del _client_cache[k]
+                logger.warning(f"Startup: cleared client cache for {len(victim_ids)} drained user(s)")
+            except Exception as _e:
+                logger.warning(f"Failed to clear client cache: {_e}")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Restore previously active bots
