@@ -223,18 +223,37 @@ ROBINHOOD_SYMBOLS: set[str] = {"BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD"}
 #   - On trend days can run 1-2%+ — wider TP captures full move (2.8× SL)
 INSTRUMENT_OVERRIDES: dict[str, dict] = {
     "GOLD": dict(
-        entry_z=1.7,            # Wait for real extremes on this range-bound instrument
-        stop_loss_pct=0.0035,   # 0.35% SL — fits GOLD's 0.3-0.6% ATR
-        take_profit_pct=0.009,  # 0.9% TP → 2.6× SL R/R, realistic for GOLD
-        trail_stop_pct=0.0025,  # Tight trail — GOLD reversals are gradual
+        # Tuned for $200-300/day target — needs more signal frequency + bigger wins
+        # than the previous conservative settings (entry_z=1.7, TP=0.9%) gave us.
+        # First trades on the conservative settings closed at +$15-17. To 10x daily
+        # profit we lower the entry bar (1.7→1.5 = ~40% more signals) and stretch TP
+        # (0.9%→1.4% = ~55% bigger wins per trade). R/R stays ~3:1.
+        entry_z=1.5,
+        stop_loss_pct=0.004,    # 0.4% SL (slightly wider for room around 1.4% TP)
+        take_profit_pct=0.014,  # 1.4% TP → 3.5× SL → ~$80-100 per max-size win
+        trail_stop_pct=0.003,
     ),
     "US100": dict(
-        entry_z=1.25,           # Trend-following — enter early to capture the move
-        stop_loss_pct=0.009,    # 0.9% SL — US100 intraday noise can exceed 0.5%
-        take_profit_pct=0.025,  # 2.5% TP → 2.8× SL, captures strong trend days
-        trail_stop_pct=0.006,   # Wide trail — don't get shaken out of a real trend
+        # US100 has wider intraday swings (0.8-1.8% ATR) → can hit much bigger TPs.
+        # Lower entry_z catches more trend continuations during the US session.
+        entry_z=1.2,
+        stop_loss_pct=0.009,
+        take_profit_pct=0.030,  # 3.0% TP → 3.3× SL → ~$200+ per max-size win
+        trail_stop_pct=0.007,
     ),
 }
+
+
+# Per-symbol minimum unrealised PnL for the z-revert smart exit (DEMO branch only).
+# The default $15 was sized for crypto's smaller position values. GOLD and US100
+# trade at much larger notionals so the z-revert fires too early — exits a winner
+# at $15 when it could have run to $50+. Raising the threshold per-instrument lets
+# Capital winners breathe while keeping crypto's quick z-revert behaviour.
+ZREVERT_MIN_PNL_BY_SYMBOL: dict[str, float] = {
+    "GOLD":  25.0,   # let GOLD wins build to $25+ before z-revert exit
+    "US100": 40.0,   # US100's wider moves justify a higher floor
+}
+DEFAULT_ZREVERT_MIN_PNL = 15.0
 
 
 def _broker_for_symbol(symbol: str) -> str:
@@ -1559,7 +1578,9 @@ async def _bot_loop(user_id: str, symbol: str):
                     # DEMO: $15 minimum unrealised PnL before z-revert can close the trade.
                     #        At 0.5% SL and 0.079 BTC, $15 = ~0.25% price move — realistic.
                     # LIVE: R-multiple gate (0.50R = half of 1R captured).
-                    _MIN_ZREVERT_PNL = 15.0   # $15 minimum profit to z-revert in demo
+                    # Per-symbol threshold — GOLD/US100 use higher floors so
+                    # Capital winners aren't cut short at the crypto-tuned $15.
+                    _MIN_ZREVERT_PNL = ZREVERT_MIN_PNL_BY_SYMBOL.get(symbol, DEFAULT_ZREVERT_MIN_PNL)
                     _unrealised_pnl = (
                         (current_price - ep) * state.current_quantity
                         if state.trade_side == "buy"
@@ -1840,8 +1861,9 @@ async def _bot_loop(user_id: str, symbol: str):
                 _sl_dist2 = ep2 * (user.stop_loss_pct if user.stop_loss_pct is not None else 0.005)
                 _r_now2 = (_profit_pct2 * ep2) / _sl_dist2 if _sl_dist2 > 0 else 0.0
                 _unrealised_pnl2 = _profit_pct2 * ep2 * qty2
+                _min_pnl2 = ZREVERT_MIN_PNL_BY_SYMBOL.get(symbol, DEFAULT_ZREVERT_MIN_PNL)
                 if abs(z_score) < 0.3:
-                    if is_demo and _unrealised_pnl2 >= 15.0:
+                    if is_demo and _unrealised_pnl2 >= _min_pnl2:
                         exit_reason2 = "z_reverted"
                     elif not is_demo and _r_now2 >= 0.50:
                         exit_reason2 = "z_reverted"
