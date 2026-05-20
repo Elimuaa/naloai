@@ -1155,6 +1155,47 @@ export function Dashboard() {
               </div>
             )}
 
+            {/* ── AI Signal Agent toggle ──
+                When enabled, every signal that passed the hardcoded filters is
+                then screened by a Claude agent that reads market context via
+                tools and decides enter/skip with reasoning. Logs go to last_signal
+                so you can read each decision live. */}
+            <div className={`flex items-center justify-between gap-3 px-4 py-3 rounded-xl border ${
+              user?.use_ai_signal_agent
+                ? 'border-purple-500/40 bg-purple-500/10'
+                : 'border-border bg-card'
+            }`}>
+              <div>
+                <p className="text-sm font-semibold">
+                  {user?.use_ai_signal_agent ? '🧠 AI Signal Agent: ON' : '🧠 AI Signal Agent: OFF'}
+                </p>
+                <p className="text-xs text-muted mt-0.5">
+                  {user?.use_ai_signal_agent
+                    ? 'Every entry signal is screened by Claude (~$0.02/signal). Watch last_signal for decisions.'
+                    : 'Hardcoded filters only. Enable to let Claude reason about each entry.'}
+                </p>
+              </div>
+              <button
+                onClick={async () => {
+                  const next = !user?.use_ai_signal_agent
+                  try {
+                    const r = await api.post('/api/bot/ai-signal-agent', { enabled: next })
+                    setToast({ msg: r.data.message, ok: true })
+                    await refreshUser()
+                  } catch (e: any) {
+                    setToast({ msg: e?.response?.data?.detail || 'Failed', ok: false })
+                  }
+                }}
+                className={`text-xs px-3 py-1.5 rounded-lg font-semibold transition-colors ${
+                  user?.use_ai_signal_agent
+                    ? 'bg-elevated border border-border text-white hover:bg-card'
+                    : 'bg-purple-500/20 border border-purple-500/40 text-purple-300 hover:bg-purple-500/30'
+                }`}
+              >
+                {user?.use_ai_signal_agent ? 'Turn OFF' : 'Turn ON'}
+              </button>
+            </div>
+
             {/* ── Force Demo Robinhood toggle ── */}
             {/* Lets the user verify the trading pipeline end-to-end with synthetic
                 signals (~2/min) without risking real Robinhood cash. Capital.com

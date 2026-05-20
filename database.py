@@ -62,6 +62,14 @@ class User(Base):
     # Capital.com already uses the demo Capital.com API so doesn't need this.
     force_demo_robinhood: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # AI Signal Agent — when True, the bot consults a Claude agent (via
+    # ai_signal_agent.decide_entry) for every candidate entry the hardcoded
+    # filters have already passed. The agent reads market context via tools
+    # and returns enter/skip + reasoning. Costs ~2-5 Claude calls per signal.
+    # Feature-flagged per-user so it can be A/B-tested against hardcoded
+    # filters before being made the default.
+    use_ai_signal_agent: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # Advanced strategy settings
     use_rsi_filter: Mapped[bool] = mapped_column(Boolean, default=True)
     use_ema_filter: Mapped[bool] = mapped_column(Boolean, default=False)  # profit-optimized (was True)
@@ -301,6 +309,7 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN capital_demo_balance REAL DEFAULT 10000.0",
             "ALTER TABLE users ADD COLUMN bot_active_capital INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN force_demo_robinhood INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN use_ai_signal_agent INTEGER DEFAULT 0",
             # Strategy memory composite index — speeds up bucket lookups
             ("CREATE INDEX IF NOT EXISTS ix_strategy_memory_bucket "
              "ON strategy_memory (symbol, side, hour_utc, regime, signal_strength_bucket, z_bucket, user_id)"),

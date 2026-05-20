@@ -204,6 +204,7 @@ async def debug_state(key: str = Query(...)):
             "bot_active": u.bot_active,
             "bot_active_capital": u.bot_active_capital,
             "force_demo_robinhood": getattr(u, "force_demo_robinhood", False),
+            "use_ai_signal_agent": getattr(u, "use_ai_signal_agent", False),
             "entry_z": u.entry_z,
             "stop_loss_pct": u.stop_loss_pct,
             "take_profit_pct": u.take_profit_pct,

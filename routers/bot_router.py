@@ -895,3 +895,29 @@ async def set_force_demo_robinhood(
             "Robinhood back to LIVE mode — real broker API in use."
         ),
     }
+
+
+@router.post("/ai-signal-agent")
+async def toggle_ai_signal_agent(
+    payload: ForceDemoPayload,    # reuses {enabled: bool} shape
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle the AI Signal Agent for this user. When enabled, the bot
+    consults a Claude agent for every candidate entry that passed the
+    hardcoded filters. The agent reads context via tools and decides
+    enter/skip with a reasoned explanation logged to the bot status."""
+    await db.execute(
+        update(User).where(User.id == current_user.id)
+        .values(use_ai_signal_agent=payload.enabled)
+    )
+    await db.commit()
+    return {
+        "use_ai_signal_agent": payload.enabled,
+        "message": (
+            "AI Signal Agent ENABLED — every entry will be screened by Claude. "
+            "Costs ~$0.02 per signal. Watch the 'last signal' field for agent decisions."
+            if payload.enabled else
+            "AI Signal Agent DISABLED — bot uses hardcoded filters only."
+        ),
+    }

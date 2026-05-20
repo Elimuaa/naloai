@@ -8,6 +8,7 @@ interface User {
   bot_active: boolean
   is_admin?: boolean
   force_demo_robinhood?: boolean
+  use_ai_signal_agent?: boolean
 }
 
 interface AuthCtx {

@@ -2032,6 +2032,47 @@ async def _bot_loop(user_id: str, symbol: str):
                             # path nulled entry_side; the demo bypass must not flip _allow_entry).
                             if not entry_side:
                                 _allow_entry = False
+
+                            # ── AI Signal Agent (per-user feature flag) ──
+                            # When use_ai_signal_agent is True, consult the Claude
+                            # agent before entering. The agent reads market context
+                            # via tools and decides enter/skip with a reasoned
+                            # explanation. Runs ONLY when hardcoded filters already
+                            # passed — saves API cost on obvious rejects.
+                            if _allow_entry and getattr(user, 'use_ai_signal_agent', False) and entry_side:
+                                try:
+                                    from ai_signal_agent import decide_entry as _agent_decide
+                                    _agent_decision = await _agent_decide(
+                                        user_id=user_id,
+                                        symbol=symbol,
+                                        side=entry_side,
+                                        z_score=z_score,
+                                        entry_price=current_price,
+                                    )
+                                    if _agent_decision["decision"] != "enter":
+                                        _allow_entry = False
+                                        state.last_signal = (
+                                            f"AI Agent: skip — {_agent_decision['reason']}"
+                                        )
+                                        logger.info(
+                                            f"AI agent REJECTED {symbol} {entry_side} "
+                                            f"(conf={_agent_decision['confidence']:.2f}): "
+                                            f"{_agent_decision['reason']}"
+                                        )
+                                    else:
+                                        logger.info(
+                                            f"AI agent APPROVED {symbol} {entry_side} "
+                                            f"(conf={_agent_decision['confidence']:.2f}): "
+                                            f"{_agent_decision['reason']}"
+                                        )
+                                except Exception as _agent_err:
+                                    # Fail-safe: if the agent itself crashes, fall back
+                                    # to the hardcoded-filter decision (already True here).
+                                    logger.warning(
+                                        f"AI agent crashed for {user_id[:8]}/{symbol}: "
+                                        f"{_agent_err} — falling back to hardcoded filters"
+                                    )
+
                             if not _allow_entry:
                                 if filter_reasons:
                                     state.last_signal = f"Signal filtered: {filter_reasons[0]}"
