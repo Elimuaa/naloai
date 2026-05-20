@@ -335,7 +335,28 @@ async def _dispatch_tool(name: str, tool_input: dict, user_id: str) -> str:
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-DEFAULT_DECISION = {"decision": "skip", "reason": "agent unavailable", "confidence": 0.0}
+# Fallback decision when the agent can't be reached (API down, credits depleted,
+# network error, parse failure). We FAIL OPEN — return "enter" so the trade
+# proceeds based on the hardcoded filters that already approved it. The agent
+# is a SECOND-LAYER veto, not a required gate; agent unavailability shouldn't
+# punish trade volume. The reason string is preserved so the operator can see
+# WHY the agent didn't weigh in, and the confidence is set to 0.0 so downstream
+# position-sizing logic doesn't size up on an un-vetted entry.
+DEFAULT_DECISION = {
+    "decision": "enter",
+    "reason": "agent unavailable — falling back to hardcoded decision",
+    "confidence": 0.0,
+}
+
+
+# Process-wide backoff: when the Anthropic API rejects us (credits depleted,
+# rate-limited), suppress all agent calls for a cooldown window. Without this,
+# the bot hammers the API every poll-tick across all 6 symbols, burning logs
+# and CPU on doomed requests. Once the operator tops up credits, the next call
+# after the cooldown will succeed and the agent resumes normal operation.
+import time as _time
+_AGENT_BLOCKED_UNTIL: float = 0.0
+_AGENT_LAST_BLOCK_REASON: str = ""
 
 
 async def decide_entry(
@@ -349,12 +370,23 @@ async def decide_entry(
     """Ask the agent whether to take this candidate entry.
 
     Returns {decision: 'enter'|'skip', reason: str, confidence: float}.
-    If anything goes wrong (no API key, network error, parse failure) we
-    return DEFAULT_DECISION (skip) — fail-safe, never enter on uncertainty.
+    FAILS OPEN — on any error returns the DEFAULT_DECISION (enter) so the
+    hardcoded-filter decision (which had already passed) stands. The agent
+    is a SECOND-LAYER veto, not a required gate.
     """
+    global _AGENT_BLOCKED_UNTIL, _AGENT_LAST_BLOCK_REASON
+    now = _time.time()
+    if now < _AGENT_BLOCKED_UNTIL:
+        wait_left = int(_AGENT_BLOCKED_UNTIL - now)
+        return {
+            "decision": "enter",
+            "reason": f"agent in cooldown ({wait_left}s) — {_AGENT_LAST_BLOCK_REASON}",
+            "confidence": 0.0,
+        }
+
     client = _get_client()
     if client is None:
-        logger.debug("No ANTHROPIC_API_KEY set — agent skipping (fail-safe)")
+        logger.debug("No ANTHROPIC_API_KEY set — agent fail-open (hardcoded decision stands)")
         return DEFAULT_DECISION
 
     user_msg = (
@@ -410,7 +442,21 @@ async def decide_entry(
         return DEFAULT_DECISION
 
     except Exception as e:
-        logger.warning(f"Agent decide_entry failed for {user_id[:8]}/{symbol}: {e}")
+        err_str = str(e)
+        # Set cooldown on hard errors that won't resolve on retry:
+        #   - credit_balance_too_low (billing issue, operator action required)
+        #   - rate_limit_error (429 — wait for the limit window)
+        # Other transient errors (network, parse) get a shorter retry-soon path.
+        if "credit balance is too low" in err_str.lower():
+            _AGENT_BLOCKED_UNTIL = _time.time() + 300.0  # 5 min — wait for operator top-up
+            _AGENT_LAST_BLOCK_REASON = "Anthropic credits depleted"
+            logger.warning(f"Agent backoff 5min: credits depleted ({user_id[:8]}/{symbol})")
+        elif "rate_limit" in err_str.lower() or "429" in err_str:
+            _AGENT_BLOCKED_UNTIL = _time.time() + 60.0   # 1 min
+            _AGENT_LAST_BLOCK_REASON = "Anthropic rate-limited"
+            logger.warning(f"Agent backoff 60s: rate-limited ({user_id[:8]}/{symbol})")
+        else:
+            logger.warning(f"Agent decide_entry failed for {user_id[:8]}/{symbol}: {err_str[:200]}")
         return DEFAULT_DECISION
 
 
