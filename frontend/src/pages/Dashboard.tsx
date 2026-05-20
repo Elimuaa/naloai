@@ -293,6 +293,11 @@ export function Dashboard() {
   const [perfMode, setPerfMode] = useState<'all' | 'live' | 'demo'>('all')
   const [demoStats, setDemoStats] = useState<Stats | null>(null)
   const [liveStats, setLiveStats] = useState<Stats | null>(null)
+  // Per-broker all-time stats — populates the broker breakdown card.
+  // Today's P&L per broker comes from rhStatus.risk.daily_pnl / capStatus.risk.daily_pnl
+  // (server-side tracked independently for each broker — never mixed).
+  const [rhStats, setRhStats] = useState<Stats | null>(null)
+  const [capStats, setCapStats] = useState<Stats | null>(null)
   const [feed, setFeed] = useState<LiveEvent[]>([])
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null)
   const [botLoading, setBotLoading] = useState(false)
@@ -402,13 +407,17 @@ export function Dashboard() {
       api.get('/api/bot/settings'),
       api.get('/api/trades/stats?mode=demo'),
       api.get('/api/trades/stats?mode=live'),
+      api.get('/api/trades/stats?broker=robinhood'),
+      api.get('/api/trades/stats?broker=capital'),
     ])
-    const [statusR, tradesR, statsR, reportR, settingsR, demoStatsR, liveStatsR] = results
+    const [statusR, tradesR, statsR, reportR, settingsR, demoStatsR, liveStatsR, rhStatsR, capStatsR] = results
     if (statusR.status === 'fulfilled') setBotStatus(statusR.value.data as BotStatusMap)
     if (tradesR.status === 'fulfilled') setTrades(tradesR.value.data)
     if (statsR.status === 'fulfilled') setStats(statsR.value.data)
     if (demoStatsR.status === 'fulfilled') setDemoStats(demoStatsR.value.data)
     if (liveStatsR.status === 'fulfilled') setLiveStats(liveStatsR.value.data)
+    if (rhStatsR.status === 'fulfilled') setRhStats(rhStatsR.value.data)
+    if (capStatsR.status === 'fulfilled') setCapStats(capStatsR.value.data)
     if (reportR.status === 'fulfilled') setReport(reportR.value.data)
     if (settingsR.status === 'fulfilled') {
       const s: Settings = settingsR.value.data
@@ -1028,6 +1037,82 @@ export function Dashboard() {
                   </div>
                 </div>
               )}
+            </div>
+
+            {/* ── Broker Breakdown ──
+                Per-broker P&L tracking — each broker has independent server-side
+                accounting (separate risk_manager, separate demo balance, separate
+                stats endpoint). Today's P&L comes from the risk_manager's daily_pnl
+                (resets at UTC midnight via RiskManager.reset_daily). All-time numbers
+                come from the trades table filtered by broker symbol set. */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {/* Robinhood Crypto card */}
+              <div className="p-4 rounded-2xl border border-border bg-card">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg">🪙</span>
+                    <p className="text-sm font-semibold">Robinhood Crypto</p>
+                  </div>
+                  <span className="text-xs text-muted">BTC · ETH · SOL · DOGE</span>
+                </div>
+                <p className="text-2xl font-bold font-mono mb-3">
+                  ${rhBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </p>
+                <div className="grid grid-cols-3 gap-2 pt-3 border-t border-border/50">
+                  <div>
+                    <p className="text-[10px] text-muted uppercase mb-1">Today</p>
+                    <p className={`text-sm font-mono font-bold ${(rhStatus?.risk?.daily_pnl ?? 0) >= 0 ? 'text-profit' : 'text-loss'}`}>
+                      {(rhStatus?.risk?.daily_pnl ?? 0) >= 0 ? '+' : ''}${(rhStatus?.risk?.daily_pnl ?? 0).toFixed(2)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-muted uppercase mb-1">All-Time</p>
+                    <p className={`text-sm font-mono font-bold ${(rhStats?.total_pnl ?? 0) >= 0 ? 'text-profit' : 'text-loss'}`}>
+                      {(rhStats?.total_pnl ?? 0) >= 0 ? '+' : ''}${(rhStats?.total_pnl ?? 0).toFixed(2)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-muted uppercase mb-1">Trades</p>
+                    <p className="text-sm font-mono font-bold text-white">
+                      {rhStats?.total ?? 0} <span className="text-muted text-xs">· {rhStats?.win_rate ?? 0}%</span>
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Capital.com card */}
+              <div className="p-4 rounded-2xl border border-border bg-card">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg">📈</span>
+                    <p className="text-sm font-semibold">Capital.com CFDs</p>
+                  </div>
+                  <span className="text-xs text-muted">GOLD · US100</span>
+                </div>
+                <p className="text-2xl font-bold font-mono mb-3">
+                  ${capBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </p>
+                <div className="grid grid-cols-3 gap-2 pt-3 border-t border-border/50">
+                  <div>
+                    <p className="text-[10px] text-muted uppercase mb-1">Today</p>
+                    <p className={`text-sm font-mono font-bold ${(capStatus?.risk?.daily_pnl ?? 0) >= 0 ? 'text-profit' : 'text-loss'}`}>
+                      {(capStatus?.risk?.daily_pnl ?? 0) >= 0 ? '+' : ''}${(capStatus?.risk?.daily_pnl ?? 0).toFixed(2)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-muted uppercase mb-1">All-Time</p>
+                    <p className={`text-sm font-mono font-bold ${(capStats?.total_pnl ?? 0) >= 0 ? 'text-profit' : 'text-loss'}`}>
+                      {(capStats?.total_pnl ?? 0) >= 0 ? '+' : ''}${(capStats?.total_pnl ?? 0).toFixed(2)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-muted uppercase mb-1">Trades</p>
+                    <p className="text-sm font-mono font-bold text-white">
+                      {capStats?.total ?? 0} <span className="text-muted text-xs">· {capStats?.win_rate ?? 0}%</span>
+                    </p>
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* ── Active Trade Banner ── */}
