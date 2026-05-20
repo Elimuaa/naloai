@@ -40,11 +40,32 @@ class CapitalComClient:
         self._security_token: str | None = None
         self._ping_task: asyncio.Task | None = None
         self._login_lock = asyncio.Lock()
+        # Backoff state — when Capital.com rate-limits us (429) or rejects auth
+        # (401), suppress further login attempts until `_login_blocked_until`
+        # passes. Prevents the bot loop from hammering the auth endpoint every
+        # poll-interval (which perpetuates the rate limit indefinitely).
+        self._login_blocked_until: float = 0.0
+        self._last_login_error: str | None = None
 
     # ── Auth ──────────────────────────────────────────────────────────────────
 
     async def _login(self):
-        """Create session, store CST + X-SECURITY-TOKEN headers."""
+        """Create session, store CST + X-SECURITY-TOKEN headers.
+
+        Honours a soft backoff: if a recent login was rejected (401) or
+        rate-limited (429), don't retry until the cooldown expires. Without
+        this guard the bot loop's per-tick price fetch would attempt a login
+        every ~5s, perpetuating the rate limit indefinitely.
+        """
+        import time as _t
+        now = _t.time()
+        if now < self._login_blocked_until:
+            wait_left = int(self._login_blocked_until - now)
+            raise ValueError(
+                f"Capital.com login suppressed ({wait_left}s left in backoff). "
+                f"Last error: {self._last_login_error or 'rate-limited'}"
+            )
+
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.post(
                 f"{self.base}/session",
@@ -59,11 +80,27 @@ class CapitalComClient:
                 },
             )
             if r.status_code not in (200, 201):
+                # Set backoff so we don't keep hammering the auth endpoint.
+                # 429 = wait long (60s) to let Capital.com's rate-limit window expire.
+                # 401 = wait moderately (30s) — creds are wrong, fast retry doesn't help.
+                # Other = short backoff (15s).
+                if r.status_code == 429:
+                    self._login_blocked_until = now + 60.0
+                elif r.status_code == 401:
+                    self._login_blocked_until = now + 30.0
+                else:
+                    self._login_blocked_until = now + 15.0
+                self._last_login_error = f"{r.status_code} {r.text[:120]}"
                 raise ValueError(f"Capital.com login failed: {r.status_code} {r.text[:200]}")
+
             self._cst = r.headers.get("CST") or r.headers.get("cst")
             self._security_token = r.headers.get("X-SECURITY-TOKEN") or r.headers.get("x-security-token")
             if not self._cst or not self._security_token:
+                self._login_blocked_until = now + 15.0
                 raise ValueError(f"Capital.com login: missing auth headers. Response: {r.text[:300]}")
+            # Login succeeded — clear backoff state
+            self._login_blocked_until = 0.0
+            self._last_login_error = None
             logger.info("Capital.com session created")
 
         # Start background ping to keep session alive
