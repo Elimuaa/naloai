@@ -120,9 +120,15 @@ async def apply_pro_boost() -> int:
 # compounding into quintillion-dollar balances and absurd quantities.
 
 _CORRUPT_BALANCE   = 1_000_000.0   # $1M+ → impossible on a $10k demo seed
-_CORRUPT_QTY       = 10_000.0      # >10k units → impossible
+_CORRUPT_NOTIONAL  = 500_000.0     # entry × qty > $500k for OPEN trade → user-level reset
 _ABSURD_PNL        = 100_000.0     # |P&L| > $100k → fake
-_ABSURD_NOTIONAL   = 50_000.0      # entry × qty > $50k → impossible (60% of $10k max)
+_ABSURD_NOTIONAL   = 50_000.0      # entry × qty > $50k → trade-level scrub only
+
+# NOTE: was using raw quantity_value > 10000 to detect "corrupt" trades, but
+# that flags any legit DOGE position (10k+ units at $0.10 = $1000 — normal).
+# Switched to notional ($500k = 70x normal max position) so only truly absurd
+# values trigger the destructive user-level reset that wipes ALL open trades
+# and sets bot_active=False.
 
 
 async def recover_corrupt_data() -> None:
@@ -135,12 +141,20 @@ async def recover_corrupt_data() -> None:
         bal_q = await db.execute(select(User).where(User.demo_balance > _CORRUPT_BALANCE))
         corrupt_users.extend(bal_q.scalars().all())
 
-        bad_uid_q = await db.execute(
-            select(Trade.user_id)
-            .where(Trade.state == "open", Trade.is_demo == True, Trade.quantity_value > _CORRUPT_QTY)
-            .distinct()
+        # Notional-based check (entry × qty > $500k) — units alone are misleading
+        # because a $7k DOGE position at $0.10/unit is 70,000 units (over the old
+        # 10k threshold) but completely legitimate. Only flag the user when the
+        # OPEN position is impossibly large by dollar value.
+        bad_open_q = await db.execute(
+            select(Trade)
+            .where(Trade.state == "open", Trade.is_demo == True, Trade.quantity_value > 0.0)
         )
-        bad_uids = {r[0] for r in bad_uid_q.all()}
+        bad_uids = set()
+        for t in bad_open_q.scalars().all():
+            ep = float(t.entry_price or 0)
+            qv = float(t.quantity_value or 0)
+            if ep > 0 and (ep * qv) > _CORRUPT_NOTIONAL:
+                bad_uids.add(t.user_id)
         if bad_uids:
             existing = {u.id for u in corrupt_users}
             extra_q = await db.execute(select(User).where(User.id.in_(bad_uids - existing)))
@@ -219,6 +233,29 @@ async def recover_corrupt_data() -> None:
         f"Startup: corruption recovery done — "
         f"{n_corrupt} users reset, {n_scrub} trades scrubbed"
     )
+
+    # ── One-shot recovery: the OLD (broken) corruption_recovery wrongly set
+    # bot_active=False on premium users with legitimate cheap-unit positions
+    # (e.g. DOGE at 70k units). Now that the threshold is notional-based, those
+    # users were never actually corrupt — restore their Robinhood bot to active
+    # so loops start again on this deploy. Capital.com bot was unaffected
+    # (uses bot_active_capital column), so we use it as the "was active" signal.
+    async with AsyncSessionLocal() as db2:
+        res = await db2.execute(
+            update(User)
+            .where(
+                User.is_premium == True,
+                User.bot_active == False,
+                User.bot_active_capital == True,
+            )
+            .values(bot_active=True)
+        )
+        if res.rowcount:
+            await db2.commit()
+            logger.warning(
+                f"Startup: re-enabled bot_active=True for {res.rowcount} premium "
+                f"user(s) wrongly disabled by old corruption_recovery"
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
